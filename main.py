@@ -206,9 +206,17 @@ async def post_chat(new_message: NewChatMessage, token: str = Depends(oauth2_sch
     
     #gaurdrails
     # Setup Guard with the validator
-    guard = Guard().use(
-    NSFWText, threshold=0.8, validation_method="sentence", on_fail="exception"
-)
+    guard = Guard().use_many(
+    NSFWText(threshold=0.8, validation_method="sentence", on_fail="exception"),
+    RestrictToTopic(
+        valid_topics=[
+            "uganda", "farm", "planting", "crops",
+            "plant", "buyanga", "mbale", "namutumbas"
+        ],
+        disable_classifier=True,
+        disable_llm=False,
+        on_fail="exception"
+        ))
     try:
         # Test failing response
         guard.validate(new_message.content)
