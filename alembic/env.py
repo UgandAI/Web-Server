@@ -6,6 +6,7 @@ from sqlalchemy import pool
 
 from app.core.config import settings
 from app.db.session import Base
+from app import models  # noqa: F401
 
 
 config = context.config
@@ -13,7 +14,6 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Import future SQLAlchemy model modules here so they register with Base.metadata.
 target_metadata = Base.metadata
 
 
