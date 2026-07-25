@@ -19,10 +19,11 @@ from tortoise.contrib.pydantic import pydantic_model_creator
 from guardrails import Guard
 from guardrails.hub import NSFWText
 from guardrails.hub import RestrictToTopic
+from app.core.config import settings
+from app.main import health_check
 
-
-# Define a simple secret key for JWT encoding
-JWT_SECRET = 'myjwtsecret'
+# Define the JWT secret from centralized configuration.
+JWT_SECRET = settings.JWT_SECRET
 client = OpenAI()
 
 # Initialize FastAPI
@@ -32,7 +33,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
+app.add_api_route("/health", health_check, methods=["GET"])
+
 _services.create_database()
+
 
 class User(Model):
     id = fields.IntField(pk=True)
