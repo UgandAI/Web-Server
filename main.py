@@ -35,8 +35,6 @@ app = FastAPI(
 
 app.add_api_route("/health", health_check, methods=["GET"])
 
-_services.create_database()
-
 
 class User(Model):
     id = fields.IntField(pk=True)
@@ -155,7 +153,7 @@ async def generate_token(form_data: OAuth2PasswordRequestForm= Depends(),  db: _
     # user_obj = await User_Pydantic.from_tortoise_orm(user)
     data = {
         'username' : user.username,
-        'password_hash' : user.password_hash
+        'password_hash' : user.hashed_password
     }
     token = jwt.encode(data, JWT_SECRET)
     return {'access_token' : token, 'token_type': 'bearer'}

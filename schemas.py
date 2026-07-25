@@ -1,5 +1,3 @@
-from typing import List
-import datetime as _dt
 import pydantic as _pydantic
 
 
@@ -14,5 +12,4 @@ class UserCreate(_UserBase):
 class User(_UserBase):
     id: int
 
-    class Config:
-        orm_mode = True
+    model_config = _pydantic.ConfigDict(from_attributes=True)
