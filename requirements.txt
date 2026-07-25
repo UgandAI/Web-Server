@@ -11,3 +11,4 @@ guardrails-ai==0.10.2
 python-dotenv==1.2.2
 pydantic==2.13.4
 requests==2.34.2
+alembic==1.17.2

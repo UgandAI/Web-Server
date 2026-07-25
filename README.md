@@ -29,3 +29,14 @@ importing `main` will fail at its `from guardrails.hub import ...` imports.
 
 The modular health application (`app.main:app`) does not import the Hub
 validators and can be used after installing `requirements.txt`.
+
+Alembic migrations
+------------------
+
+Alembic reads `DATABASE_URL` from the centralized application settings and uses
+the local SQLite default when the variable is not set:
+
+```shell
+alembic current
+alembic heads
+```
