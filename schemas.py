@@ -1,6 +1,5 @@
-from typing import List
-import datetime as _dt
 import pydantic as _pydantic
+from typing import Optional
 
 
 class _UserBase(_pydantic.BaseModel):
@@ -14,5 +13,12 @@ class UserCreate(_UserBase):
 class User(_UserBase):
     id: int
 
-    class Config:
-        orm_mode = True
+    model_config = _pydantic.ConfigDict(from_attributes=True)
+
+
+class SignupCreate(UserCreate):
+    email: str
+
+
+class SignupUser(User):
+    email: Optional[str] = None

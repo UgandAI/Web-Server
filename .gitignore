@@ -1,6 +1,9 @@
 venv/*
+.venv/
 examples/fastapi-user/__pycache__/*
 __pycache__/*
+__pycache__/
+*.pyc
 examples/fastapi-user/database.db
 myenv/*
 examples/fastapi-user/venv/*
