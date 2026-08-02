@@ -13,10 +13,17 @@ def utc_now() -> datetime:
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("username", name="uq_users_username"),)
+    __table_args__ = (
+        UniqueConstraint("username", name="uq_users_username"),
+        UniqueConstraint("email", name="uq_users_email"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(
+        String(320),
+        nullable=True,
+    )
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -37,4 +44,8 @@ class User(Base):
         cascade="all, delete-orphan",
         single_parent=True,
         uselist=False,
+    )
+    farm_profiles: Mapped[list["FarmProfile"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
     )

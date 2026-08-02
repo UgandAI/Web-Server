@@ -24,8 +24,9 @@ guardrails hub install hub://tryolabs/restricttotopic
 
 Guardrails Hub currently requires the Guardrails CLI to be configured with an
 authenticated Hub account before it will install these validators. Do not store
-the Guardrails token in this repository. Until both validators are installed,
-importing `main` will fail at its `from guardrails.hub import ...` imports.
+the Guardrails token in this repository. The application remains importable
+without the optional Hub validators so authentication and health endpoints can
+run locally; chat validation is enabled when both validators are installed.
 
 The modular health application (`app.main:app`) does not import the Hub
 validators and can be used after installing `requirements.txt`.
@@ -39,4 +40,27 @@ the local SQLite default when the variable is not set:
 ```shell
 alembic current
 alembic heads
+```
+
+Local MySQL with Docker Compose
+-------------------------------
+
+Start MySQL and the modular FastAPI health service:
+
+```shell
+docker compose up --build -d
+docker compose exec backend alembic upgrade head
+```
+
+Run the MySQL authentication integration test from a local virtual environment:
+
+```shell
+MYSQL_TEST_DATABASE_URL=mysql+pymysql://ugandai:localdev@127.0.0.1:3307/ugandai \
+python -m unittest -v tests.test_auth_mysql
+```
+
+The existing SQLite authentication tests remain available with:
+
+```shell
+python -m unittest -v tests.test_auth
 ```

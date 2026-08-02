@@ -3,22 +3,28 @@ from typing import List, Optional
 import os
 from openai import OpenAI, AssistantEventHandler
 from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
-import jwt
 import re
 import sqlalchemy.orm as _orm
 from dotenv import load_dotenv
 import services as _services, schemas as _schemas
 from tortoise.models import Model
 from tortoise import fields
-from passlib.hash import bcrypt
 from tortoise.contrib.pydantic import pydantic_model_creator
 from guardrails import Guard
-from guardrails.hub import NSFWText
-from guardrails.hub import RestrictToTopic
+try:
+    from guardrails.hub import NSFWText, RestrictToTopic
+except ImportError:
+    NSFWText = None
+    RestrictToTopic = None
+from app.auth.dependencies import (
+    get_current_user,
+    oauth2_scheme,
+)
+from app.auth.security import encode_jwt, verify_password
 from app.core.config import settings
 from app.main import health_check
 
@@ -42,12 +48,11 @@ class User(Model):
     password_hash = fields.CharField(128)
 
     def verify_password(self, password):
-        return bcrypt.verify(password, self.password_hash)
+        return verify_password(password, self.password_hash)
 
 
 User_Pydantic = pydantic_model_creator(User, name='User')
 UserIn_Pydantic = pydantic_model_creator(User, name='UserIn', exclude_readonly=True)
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
 # Models
@@ -155,7 +160,7 @@ async def generate_token(form_data: OAuth2PasswordRequestForm= Depends(),  db: _
         'username' : user.username,
         'password_hash' : user.hashed_password
     }
-    token = jwt.encode(data, JWT_SECRET)
+    token = encode_jwt(data)
     return {'access_token' : token, 'token_type': 'bearer'}
 
 
@@ -186,6 +191,22 @@ async def create_user(user: _schemas.UserCreate, db: _orm.Session = Depends(_ser
         )
     return _services.create_user(db=db, user=user)
 
+
+@app.post("/signup", response_model=_schemas.SignupUser)
+async def signup(
+    user: _schemas.SignupCreate,
+    db: _orm.Session = Depends(_services.get_db),
+):
+    return await create_user(user=user, db=db)
+
+
+@app.post("/login", tags=["User"])
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: _orm.Session = Depends(_services.get_db),
+):
+    return await generate_token(form_data=form_data, db=db)
+
 # Chat Endpoints
 @app.get("/chats", response_model=List[ChatMessage])
 def get_chats():
@@ -204,17 +225,24 @@ async def post_chat(new_message: NewChatMessage, token: str = Depends(oauth2_sch
     
     #gaurdrails
     # Setup Guard with the validator
-    guard = Guard().use_many(
-    NSFWText(threshold=0.8, validation_method="sentence", on_fail="exception"),
-    RestrictToTopic(
-        valid_topics=[
-            "uganda", "farm", "planting", "crops",
-            "plant", "buyanga", "mbale", "namutumbas"
-        ],
-        disable_classifier=True,
-        disable_llm=False,
-        on_fail="exception"
-        ))
+    guard = Guard()
+    if NSFWText is not None and RestrictToTopic is not None:
+        guard = guard.use_many(
+            NSFWText(
+                threshold=0.8,
+                validation_method="sentence",
+                on_fail="exception",
+            ),
+            RestrictToTopic(
+                valid_topics=[
+                    "uganda", "farm", "planting", "crops",
+                    "plant", "buyanga", "mbale", "namutumbas"
+                ],
+                disable_classifier=True,
+                disable_llm=False,
+                on_fail="exception",
+            ),
+        )
     try:
         # Test failing response
         guard.validate(new_message.content)
@@ -250,23 +278,8 @@ def get_chat(messageId: str):
             return chat
     raise HTTPException(status_code=404, detail="Message not found")
 
-# Items Endpoint (Example secured endpoint)
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
-
 async def get_token(token: str = Depends(oauth2_scheme),  db: _orm.Session = Depends(_services.get_db)):
-    try:
-        print("get_token")
-        payload = jwt.decode(token , JWT_SECRET, algorithms=['HS256'])
-        # user = await User.get(id=payload.get('id'))
-        username = payload.get('username')
-        print(f'username {username}')
-        user = _services.get_user_by_username(db=db,username=payload.get('username'))
-        # user: str = payload.get("username")
-        # print(f'username {user}')
-    except:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-        detail = 'Invalid Username or Password')
-    return user
+    return await get_current_user(token=token, db=db)
 
 @app.post("/items/")
 async def get_items(str: Optional[str], token: str = Depends(oauth2_scheme), db: _orm.Session = Depends(_services.get_db)):

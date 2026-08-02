@@ -1,9 +1,9 @@
 import sqlalchemy.orm as _orm
 
 import schemas as _schemas
+from app.auth.security import hash_password, verify_password as verify_hash
 from app.db.session import get_db
 from app.models import User
-from passlib.hash import bcrypt
 
 
 def get_user(db: _orm.Session, user_id: int):
@@ -12,7 +12,7 @@ def get_user(db: _orm.Session, user_id: int):
 
 def verify_password(db: _orm.Session, username: str, password: str):
     user_obj = db.query(User).filter(User.username == username).first()
-    return bcrypt.verify(password, user_obj.hashed_password)
+    return verify_hash(password, user_obj.hashed_password)
 
 
 def get_user_by_username(db: _orm.Session, username: str):
@@ -26,7 +26,8 @@ def get_users(db: _orm.Session, skip: int = 0, limit: int = 100):
 def create_user(db: _orm.Session, user: _schemas.UserCreate):
     db_user = User(
         username=user.username,
-        hashed_password=bcrypt.hash(user.password),
+        email=getattr(user, "email", None),
+        hashed_password=hash_password(user.password),
     )
     db.add(db_user)
     db.commit()

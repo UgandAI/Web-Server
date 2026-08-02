@@ -97,6 +97,25 @@ class AuthenticationTests(unittest.TestCase):
 
         self.assertFalse(Tortoise._inited)
 
+    def test_signup_and_login_aliases(self):
+        signup = self.client.post(
+            "/signup",
+            json={
+                "username": "alice",
+                "email": "alice@example.test",
+                "password": "correct-password",
+            },
+        )
+        self.assertEqual(signup.status_code, 200)
+        self.assertEqual(signup.json()["email"], "alice@example.test")
+
+        login = self.client.post(
+            "/login",
+            data={"username": "alice", "password": "correct-password"},
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(login.json()["token_type"], "bearer")
+
     def test_duplicate_username_rejection(self):
         self.assertEqual(self.register().status_code, 200)
 

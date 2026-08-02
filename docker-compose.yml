@@ -1,0 +1,36 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ugandai
+      MYSQL_USER: ugandai
+      MYSQL_PASSWORD: localdev
+      MYSQL_ROOT_PASSWORD: localroot
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uugandai", "-plocaldev"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: .
+    environment:
+      DATABASE_URL: mysql+pymysql://ugandai:localdev@mysql:3306/ugandai
+      JWT_SECRET: local-development-secret-change-me
+    ports:
+      - "8001:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+volumes:
+  mysql_data:
