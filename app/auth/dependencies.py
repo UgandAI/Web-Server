@@ -8,7 +8,7 @@ from app.db.session import get_db
 from app.models import User
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token")
 
 
 async def get_current_user(
@@ -21,6 +21,8 @@ async def get_current_user(
             db=db,
             username=payload.get("username"),
         )
+        if user is None:
+            raise ValueError("User does not exist")
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -2,7 +2,11 @@ Environment variables
 ---------------------
 
 ```shell
-VERIFIED_USERS=Bob,John,Aran,Yirga,Brad
+DATABASE_URL=sqlite:///./database.db
+JWT_SECRET=replace-with-at-least-32-random-bytes
+VERIFIED_USERS=farmer@example.com
+OPENAI_API_KEY=replace-with-your-api-key
+OPENAI_MODEL=replace-with-an-available-responses-api-model
 ```
 
 Local installation
@@ -32,11 +36,8 @@ guardrails hub install hub://tryolabs/restricttotopic
 Guardrails Hub currently requires the Guardrails CLI to be configured with an
 authenticated Hub account before it will install these validators. Do not store
 the Guardrails token in this repository. The application remains importable
-without the optional Hub validators so authentication and health endpoints can
-run locally; chat validation is enabled when both validators are installed.
-
-The modular health application (`app.main:app`) does not import the Hub
-validators and can be used after installing `requirements.txt`.
+without usable optional Hub validators. Chat validation is enabled when both
+validators are installed; the API remains runnable when they are unavailable.
 
 Alembic migrations
 ------------------
@@ -49,10 +50,17 @@ alembic current
 alembic heads
 ```
 
+Start the canonical API:
+
+```shell
+alembic upgrade head
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
 Local MySQL with Docker Compose
 -------------------------------
 
-Start MySQL and the modular FastAPI health service:
+Start MySQL and the canonical FastAPI service:
 
 ```shell
 docker compose up --build -d

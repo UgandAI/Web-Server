@@ -15,8 +15,12 @@ def verify_password(password: str, hashed_password: str) -> bool:
 
 
 def encode_jwt(claims: dict[str, Any]) -> str:
+    if not settings.JWT_SECRET:
+        raise RuntimeError("JWT_SECRET is required")
     return jwt.encode(claims, settings.JWT_SECRET)
 
 
 def decode_jwt(token: str) -> dict[str, Any]:
+    if not settings.JWT_SECRET:
+        raise RuntimeError("JWT_SECRET is required")
     return jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])

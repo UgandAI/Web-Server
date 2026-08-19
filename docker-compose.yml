@@ -21,7 +21,10 @@ services:
     build: .
     environment:
       DATABASE_URL: mysql+pymysql://ugandai:localdev@mysql:3306/ugandai
-      JWT_SECRET: local-development-secret-change-me
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      VERIFIED_USERS: farmer@example.com
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
     ports:
       - "8001:8000"
     depends_on:

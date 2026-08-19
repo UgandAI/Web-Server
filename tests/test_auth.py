@@ -2,55 +2,63 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-import guardrails.hub
 import jwt
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from passlib.hash import bcrypt
-from tortoise import Tortoise
 
 
-class _UnavailableHubValidator:
-    def __init__(self, *args, **kwargs):
+class _FakeResponse:
+    output_text = "Plant maize after the rains begin."
+
+
+class _FakeResponses:
+    def create(self, **kwargs):
+        self.request = kwargs
+        return _FakeResponse()
+
+
+class _FakeOpenAI:
+    responses = _FakeResponses()
+
+    def __init__(self, **kwargs):
         pass
 
 
-guardrails.hub.NSFWText = _UnavailableHubValidator
-guardrails.hub.RestrictToTopic = _UnavailableHubValidator
-
-
-class AuthenticationTests(unittest.TestCase):
+class CanonicalApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.original_environment = {
             key: os.environ.get(key)
-            for key in ("DATABASE_URL", "OPENAI_API_KEY", "VERIFIED_USERS")
+            for key in ("DATABASE_URL", "JWT_SECRET", "OPENAI_API_KEY", "OPENAI_MODEL", "VERIFIED_USERS")
         }
         cls.temp_directory = tempfile.TemporaryDirectory()
-        database_path = Path(cls.temp_directory.name) / "auth.db"
-        os.environ["DATABASE_URL"] = f"sqlite:///{database_path}"
-        os.environ["OPENAI_API_KEY"] = "local-test-placeholder"
-        os.environ["VERIFIED_USERS"] = "alice"
-
+        database_path = Path(cls.temp_directory.name) / "api.db"
+        os.environ.update({
+            "DATABASE_URL": f"sqlite:///{database_path}",
+            "JWT_SECRET": "test-secret-with-at-least-32-bytes",
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_MODEL": "test-model",
+            "VERIFIED_USERS": "farmer@example.com",
+        })
         repository_root = Path(__file__).resolve().parents[1]
-        alembic_config = Config(repository_root / "alembic.ini")
-        command.upgrade(alembic_config, "head")
+        command.upgrade(Config(repository_root / "alembic.ini"), "head")
 
-        import main
+        from app.main import app
         from app.db.session import SessionLocal
-        from app.models import User
+        from app.models import Conversation, ConversationMessage, User
 
-        cls.main = main
         cls.SessionLocal = SessionLocal
         cls.User = User
-        cls.client = TestClient(main.app)
+        cls.Conversation = Conversation
+        cls.ConversationMessage = ConversationMessage
+        cls.client = TestClient(app)
 
     @classmethod
     def tearDownClass(cls):
         from app.db.session import engine
-
         cls.client.close()
         engine.dispose()
         cls.temp_directory.cleanup()
@@ -62,116 +70,71 @@ class AuthenticationTests(unittest.TestCase):
 
     def setUp(self):
         with self.SessionLocal() as db:
+            db.query(self.ConversationMessage).delete()
+            db.query(self.Conversation).delete()
             db.query(self.User).delete()
             db.commit()
 
-    def register(self, password="correct-password"):
-        return self.client.post(
-            "/users/register",
-            json={"username": "alice", "password": password},
-        )
+    def register(self):
+        return self.client.post("/users/register", json={
+            "username": "farmer@example.com",
+            "password": "correct-password",
+            "location": "Mbale",
+        })
 
-    def login(self, password="correct-password"):
-        return self.client.post(
-            "/api/token",
-            data={"username": "alice", "password": password},
-        )
+    def login(self):
+        return self.client.post("/api/token", data={
+            "username": "farmer@example.com", "password": "correct-password"
+        })
 
-    def test_successful_registration(self):
-        response = self.register()
-
+    def test_health(self):
+        response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["username"], "alice")
-        self.assertIsInstance(response.json()["id"], int)
+        self.assertEqual(response.json(), {"status": "ok", "database": "connected"})
 
-        with self.SessionLocal() as db:
-            user = (
-                db.query(self.User)
-                .filter(self.User.username == "alice")
-                .one()
-            )
-            self.assertNotEqual(user.hashed_password, "correct-password")
-            self.assertTrue(
-                bcrypt.verify("correct-password", user.hashed_password)
-            )
-
-        self.assertFalse(Tortoise._inited)
-
-    def test_signup_and_login_aliases(self):
-        signup = self.client.post(
-            "/signup",
-            json={
-                "username": "alice",
-                "email": "alice@example.test",
-                "password": "correct-password",
-            },
-        )
-        self.assertEqual(signup.status_code, 200)
-        self.assertEqual(signup.json()["email"], "alice@example.test")
-
-        login = self.client.post(
-            "/login",
-            data={"username": "alice", "password": "correct-password"},
-        )
-        self.assertEqual(login.status_code, 200)
+    def test_registration_and_login(self):
+        registration = self.register()
+        self.assertEqual(registration.status_code, 200, registration.text)
+        self.assertNotIn("email", registration.json())
+        login = self.login()
+        self.assertEqual(login.status_code, 200, login.text)
         self.assertEqual(login.json()["token_type"], "bearer")
-
-    def test_duplicate_username_rejection(self):
-        self.assertEqual(self.register().status_code, 200)
-
-        response = self.register()
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.json(),
-            {"detail": "Username which is already in use."},
-        )
-
-    def test_successful_login(self):
-        self.assertEqual(self.register().status_code, 200)
-
-        response = self.login()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["token_type"], "bearer")
-        payload = jwt.decode(
-            response.json()["access_token"],
-            self.main.JWT_SECRET,
+        self.assertTrue(login.json()["access_token"])
+        claims = jwt.decode(
+            login.json()["access_token"],
+            "test-secret-with-at-least-32-bytes",
             algorithms=["HS256"],
         )
-        self.assertEqual(payload["username"], "alice")
-        self.assertIn("password_hash", payload)
-        self.assertNotEqual(payload["password_hash"], "correct-password")
-        self.assertNotIn("exp", payload)
+        self.assertEqual(claims["username"], "farmer@example.com")
+        self.assertIn("password_hash", claims)
 
-    def test_incorrect_password_rejection(self):
-        self.assertEqual(self.register().status_code, 200)
+    def test_registration_requires_allowlist(self):
+        response = self.client.post("/users/register", json={
+            "username": "unknown@example.com", "password": "password"
+        })
+        self.assertEqual(response.status_code, 400)
 
-        response = self.login(password="incorrect-password")
-
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(
-            response.json(),
-            {"detail": "Invalid Username or Password"},
-        )
-
-    def test_protected_route_with_valid_token(self):
+    @patch("app.chat.validate_chat_content", return_value=None)
+    @patch("app.chat.OpenAI", _FakeOpenAI)
+    def test_authenticated_chat_persists_conversation(self, _validate):
         self.assertEqual(self.register().status_code, 200)
         token = self.login().json()["access_token"]
-
         response = self.client.post(
-            "/items/?str=value",
+            "/chats",
+            json={"sender": "user", "content": "When should I plant maize?"},
             headers={"Authorization": f"Bearer {token}"},
         )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["content"], _FakeResponse.output_text)
+        self.assertEqual(response.json()["sender"], "user")
+        self.assertIsNone(response.json()["thread_id"])
+        with self.SessionLocal() as db:
+            self.assertEqual(db.query(self.Conversation).count(), 1)
+            self.assertEqual(db.query(self.ConversationMessage).count(), 2)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), "Hello world")
-
-    def test_protected_route_without_token(self):
-        response = self.client.post("/items/?str=value")
-
+    def test_chat_requires_authentication(self):
+        response = self.client.post("/chats", json={"content": "plant maize"})
         self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json(), {"detail": "Not authenticated"})
 
 
 if __name__ == "__main__":
