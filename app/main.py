@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 import logging
 from typing import Optional
-from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -12,7 +11,8 @@ from sqlalchemy.orm import Session
 import schemas
 from app.auth.dependencies import get_current_user
 from app.auth.security import encode_jwt, verify_password
-from app.chat import create_chat_response
+from app.chat import get_or_create_conversation, send_message
+from app.chat_api import router as chat_router
 from app.core.config import settings
 from app.db.session import check_db_connection, get_db
 from app.models import User
@@ -21,6 +21,7 @@ from services import create_user, get_user_by_username
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="UgandAI API", description="UgandAI backend API", version="1.0.0")
+app.include_router(chat_router)
 
 
 class ChatRequest(BaseModel):
@@ -78,6 +79,15 @@ def issue_token(
     return {"access_token": token, "token_type": "bearer"}
 
 
+@app.post("/items/")
+def protected_items(
+    str: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """Preserve the Week 1 protected-route contract on the canonical app."""
+    return "Hello world"
+
+
 @app.post("/chats", response_model=ChatResponse, status_code=status.HTTP_201_CREATED)
 def chat(
     request: ChatRequest,
@@ -85,11 +95,12 @@ def chat(
     db: Session = Depends(get_db),
 ):
     try:
-        content = create_chat_response(db, user, request.content)
+        conversation = get_or_create_conversation(db, user)
+        _, assistant_message = send_message(db, conversation, request.content)
     except Exception as exc:
         logger.exception("Chat request failed")
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Chat service unavailable") from exc
     return ChatResponse(
-        messageId=str(uuid4()), sender=request.sender, content=content,
+        messageId=str(assistant_message.id), sender=request.sender, content=assistant_message.content,
         timestamp=datetime.now(timezone.utc), thread_id=None
     )

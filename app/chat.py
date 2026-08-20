@@ -1,16 +1,15 @@
 import logging
 
-from openai import OpenAI
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
-from app.models import Conversation, ConversationMessage, User
+from app.models import Conversation, Message, User
+from app.openai_service import ChatModel, OpenAIResponsesService
 
 logger = logging.getLogger(__name__)
 
 
 def validate_chat_content(content: str) -> None:
-    """Run the existing validators when their optional Hub packages are usable."""
+    """Run existing validators when their optional Hub packages are usable."""
     try:
         from guardrails import Guard
         from guardrails.hub import NSFWText, RestrictToTopic
@@ -23,7 +22,7 @@ def validate_chat_content(content: str) -> None:
         RestrictToTopic(
             valid_topics=[
                 "uganda", "farm", "farming", "planting", "crops", "plant",
-                "buyanga", "mbale", "namutumba"
+                "buyanga", "mbale", "namutumba",
             ],
             disable_classifier=True,
             disable_llm=False,
@@ -33,46 +32,52 @@ def validate_chat_content(content: str) -> None:
     guard.validate(content)
 
 
-def create_chat_response(db: Session, user: User, content: str) -> str:
-    if not settings.OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is required for chat")
-    if not settings.OPENAI_MODEL:
-        raise RuntimeError("OPENAI_MODEL is required for chat")
+def create_conversation(db: Session, user: User) -> Conversation:
+    conversation = Conversation(user_id=user.id)
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+    return conversation
 
-    try:
-        validate_chat_content(content)
-    except Exception as exc:
-        return str(exc)
-    conversation = db.query(Conversation).filter(Conversation.user_id == user.id).first()
-    if conversation is None:
-        conversation = Conversation(user_id=user.id)
-        db.add(conversation)
-        db.flush()
 
-    db.add(ConversationMessage(
-        conversation_id=conversation.id, role="user", content=content
-    ))
+def get_owned_conversation(
+    db: Session, user: User, conversation_id: int
+) -> Conversation | None:
+    return db.query(Conversation).filter(
+        Conversation.id == conversation_id,
+        Conversation.user_id == user.id,
+    ).first()
+
+
+def send_message(
+    db: Session,
+    conversation: Conversation,
+    content: str,
+    model: ChatModel | None = None,
+) -> tuple[Message, Message]:
+    validate_chat_content(content)
+    user_message = Message(conversation_id=conversation.id, role="user", content=content)
+    db.add(user_message)
     db.flush()
     history = [
         {"role": message.role, "content": message.content}
         for message in conversation.messages
     ]
-
     try:
-        response = OpenAI(api_key=settings.OPENAI_API_KEY).responses.create(
-            model=settings.OPENAI_MODEL,
-            input=history,
-            store=False,
+        response_text = (model or OpenAIResponsesService()).respond(history)
+        assistant_message = Message(
+            conversation_id=conversation.id, role="assistant", content=response_text
         )
-        response_text = response.output_text
-        if not response_text:
-            raise RuntimeError("OpenAI returned no text response")
+        db.add(assistant_message)
+        db.commit()
+        db.refresh(user_message)
+        db.refresh(assistant_message)
+        return user_message, assistant_message
     except Exception:
         db.rollback()
         raise
 
-    db.add(ConversationMessage(
-        conversation_id=conversation.id, role="assistant", content=response_text
-    ))
-    db.commit()
-    return response_text
+
+def get_or_create_conversation(db: Session, user: User) -> Conversation:
+    conversation = db.query(Conversation).filter(Conversation.user_id == user.id).first()
+    return conversation or create_conversation(db, user)

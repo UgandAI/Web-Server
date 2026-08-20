@@ -57,6 +57,30 @@ alembic upgrade head
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+Chat API
+--------
+
+All chat routes require `Authorization: Bearer <JWT>`:
+
+```text
+POST /conversations
+  body: none
+  response: {"id": 1, "created_at": "...", "updated_at": "..."}
+
+POST /conversations/{conversation_id}/messages
+  body: {"content": "When should I plant maize?"}
+  response: {"user_message": {"id": 1, "conversation_id": 1, "role": "user", "content": "...", "created_at": "..."},
+             "assistant_message": {"id": 2, "conversation_id": 1, "role": "assistant", "content": "...", "created_at": "..."}}
+
+GET /conversations/{conversation_id}/messages
+  response: [{"id": 1, "conversation_id": 1, "role": "user", "content": "...", "created_at": "..."}]
+```
+
+`POST /chats` remains as a temporary compatibility route for older clients. The
+canonical Android flow uses the conversation routes above. Conversation history
+is stored in MySQL; OpenAI calls are made through the Responses API with remote
+storage disabled.
+
 Local MySQL with Docker Compose
 -------------------------------
 

@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from unittest.mock import MagicMock
 
 import jwt
 from alembic import command
@@ -14,17 +15,9 @@ class _FakeResponse:
     output_text = "Plant maize after the rains begin."
 
 
-class _FakeResponses:
-    def create(self, **kwargs):
-        self.request = kwargs
-        return _FakeResponse()
-
-
-class _FakeOpenAI:
-    responses = _FakeResponses()
-
-    def __init__(self, **kwargs):
-        pass
+def _fake_respond(_self, messages):
+    assert messages[-1] == {"role": "user", "content": "When should I plant maize?"}
+    return _FakeResponse.output_text
 
 
 class CanonicalApiTests(unittest.TestCase):
@@ -115,7 +108,7 @@ class CanonicalApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     @patch("app.chat.validate_chat_content", return_value=None)
-    @patch("app.chat.OpenAI", _FakeOpenAI)
+    @patch("app.openai_service.OpenAIResponsesService.respond", _fake_respond)
     def test_authenticated_chat_persists_conversation(self, _validate):
         self.assertEqual(self.register().status_code, 200)
         token = self.login().json()["access_token"]
@@ -131,6 +124,51 @@ class CanonicalApiTests(unittest.TestCase):
         with self.SessionLocal() as db:
             self.assertEqual(db.query(self.Conversation).count(), 1)
             self.assertEqual(db.query(self.ConversationMessage).count(), 2)
+
+    @patch("app.chat.validate_chat_content", return_value=None)
+    @patch("app.openai_service.OpenAIResponsesService.respond", _fake_respond)
+    def test_week2_conversation_send_and_history(self, _validate):
+        self.assertEqual(self.register().status_code, 200)
+        token = self.login().json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        created = self.client.post("/conversations", headers=headers)
+        self.assertEqual(created.status_code, 201, created.text)
+        conversation_id = created.json()["id"]
+
+        sent = self.client.post(
+            f"/conversations/{conversation_id}/messages",
+            json={"content": "When should I plant maize?"},
+            headers=headers,
+        )
+        self.assertEqual(sent.status_code, 201, sent.text)
+        self.assertEqual(sent.json()["user_message"]["role"], "user")
+        self.assertEqual(sent.json()["assistant_message"]["content"], _FakeResponse.output_text)
+
+        history = self.client.get(
+            f"/conversations/{conversation_id}/messages", headers=headers
+        )
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual([item["role"] for item in history.json()], ["user", "assistant"])
+        with self.SessionLocal() as db:
+            self.assertEqual(db.query(self.ConversationMessage).count(), 2)
+
+    def test_conversation_routes_require_authentication(self):
+        self.assertEqual(self.client.post("/conversations").status_code, 401)
+        self.assertEqual(self.client.get("/conversations/1/messages").status_code, 401)
+
+    @patch("app.openai_service.OpenAI")
+    def test_openai_wrapper_uses_responses_api_without_remote_storage(self, openai):
+        response = MagicMock(output_text="Controlled response")
+        openai.return_value.responses.create.return_value = response
+        from app.openai_service import OpenAIResponsesService
+
+        service = OpenAIResponsesService()
+        messages = [{"role": "user", "content": "When should I plant maize?"}]
+        self.assertEqual(service.respond(messages), "Controlled response")
+        openai.return_value.responses.create.assert_called_once_with(
+            model="test-model", input=messages, store=False
+        )
 
     def test_chat_requires_authentication(self):
         response = self.client.post("/chats", json={"content": "plant maize"})
