@@ -79,7 +79,7 @@ class CanonicalApiTests(unittest.TestCase):
         return self.client.post("/users/register", json={
             "username": "farmer@example.com",
             "password": "correct-password",
-            "location": "Mbale",
+            "email": "farmer@example.com",
         })
 
     def login(self):
