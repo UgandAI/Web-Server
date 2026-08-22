@@ -18,9 +18,17 @@ from app.db.session import check_db_connection, get_db
 from app.models import User
 from services import create_user, get_user_by_username
 
+from app.profiles.router import router as profiles_router
+from app.logbook.router import router as logbook_router
+from app.recommendations.router import router as recommendations_router
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="UgandAI API", description="UgandAI backend API", version="1.0.0")
+
+app.include_router(profiles_router)
+app.include_router(logbook_router)
+app.include_router(recommendations_router)
 
 
 class ChatRequest(BaseModel):
@@ -78,18 +86,20 @@ def issue_token(
     return {"access_token": token, "token_type": "bearer"}
 
 
-@app.post("/chats", response_model=ChatResponse, status_code=status.HTTP_201_CREATED)
+from fastapi.responses import StreamingResponse
+
+@app.post("/chats", status_code=status.HTTP_200_OK)
 def chat(
     request: ChatRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     try:
-        content = create_chat_response(db, user, request.content)
+        # Pass the generator directly to StreamingResponse
+        return StreamingResponse(
+            create_chat_response(db, user, request.content),
+            media_type="text/event-stream"
+        )
     except Exception as exc:
         logger.exception("Chat request failed")
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Chat service unavailable") from exc
-    return ChatResponse(
-        messageId=str(uuid4()), sender=request.sender, content=content,
-        timestamp=datetime.now(timezone.utc), thread_id=None
-    )

@@ -49,3 +49,7 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    logbook_entries: Mapped[list["LogbookEntry"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )

@@ -1,4 +1,5 @@
 import logging
+import json
 
 from openai import OpenAI
 from sqlalchemy.orm import Session
@@ -59,20 +60,28 @@ def create_chat_response(db: Session, user: User, content: str) -> str:
     ]
 
     try:
-        response = OpenAI(api_key=settings.OPENAI_API_KEY).responses.create(
+        # Include SYSTEM_PROMPT in history
+        history.insert(0, {"role": "system", "content": getattr(settings, 'SYSTEM_PROMPT', "You are a helpful assistant")})
+        
+        response = OpenAI(api_key=settings.OPENAI_API_KEY).chat.completions.create(
             model=settings.OPENAI_MODEL,
-            input=history,
-            store=False,
+            messages=history,
+            stream=True,
         )
-        response_text = response.output_text
-        if not response_text:
-            raise RuntimeError("OpenAI returned no text response")
-    except Exception:
+        
+        full_response = ""
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                text_chunk = chunk.choices[0].delta.content
+                full_response += text_chunk
+                yield f"data: {json.dumps({'content': text_chunk})}\n\n"
+        
+        db.add(ConversationMessage(
+            conversation_id=conversation.id, role="assistant", content=full_response
+        ))
+        db.commit()
+        
+    except Exception as exc:
         db.rollback()
-        raise
-
-    db.add(ConversationMessage(
-        conversation_id=conversation.id, role="assistant", content=response_text
-    ))
-    db.commit()
-    return response_text
+        logger.exception("Streaming chat failed")
+        yield f"data: {json.dumps({'error': str(exc)})}\n\n"
