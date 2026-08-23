@@ -17,15 +17,16 @@ async def get_current_user(
 ) -> User:
     try:
         payload = decode_jwt(token)
-        user = services.get_user_by_username(
-            db=db,
-            username=payload.get("username"),
-        )
+        subject = payload.get("sub")
+        if not isinstance(subject, str) or not subject.isdigit():
+            raise ValueError("Invalid token subject")
+        user = services.get_user(db, int(subject))
         if user is None:
             raise ValueError("User does not exist")
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Username or Password",
+            detail="Invalid or expired authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     return user

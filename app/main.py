@@ -1,10 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime
+from contextlib import asynccontextmanager
 import logging
-from typing import Optional
-from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -13,9 +13,9 @@ import schemas
 from app.auth.dependencies import get_current_user
 from app.auth.security import encode_jwt, verify_password
 from app.chat import create_chat_response
-from app.core.config import settings
+from app.core.config import settings, validate_startup_settings
 from app.db.session import check_db_connection, get_db
-from app.models import User
+from app.models import Conversation, ConversationMessage, User
 from services import create_user, get_user_by_username
 
 from app.profiles.router import router as profiles_router
@@ -26,7 +26,15 @@ from app.voice.router import router as voice_router
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="UgandAI API", description="UgandAI backend API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    validate_startup_settings()
+    yield
+
+
+app = FastAPI(
+    title="UgandAI API", description="UgandAI backend API", version="1.0.0", lifespan=lifespan
+)
 
 app.include_router(profiles_router)
 app.include_router(logbook_router)
@@ -35,17 +43,10 @@ app.include_router(knowledge_router)
 app.include_router(voice_router)
 
 
+
 class ChatRequest(BaseModel):
     sender: str = "user"
     content: str
-
-
-class ChatResponse(BaseModel):
-    messageId: str
-    sender: str
-    content: str
-    timestamp: datetime
-    thread_id: Optional[str] = None
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
@@ -86,11 +87,39 @@ def issue_token(
     user = get_user_by_username(db, form_data.username)
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid Username or Password")
-    token = encode_jwt({"username": user.username, "password_hash": user.hashed_password})
+    token = encode_jwt({"sub": str(user.id), "username": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
 
-from fastapi.responses import StreamingResponse
+class ConversationSummary(BaseModel):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class MessageSummary(BaseModel):
+    id: int
+    role: str
+    content: str
+    created_at: datetime
+
+
+@app.get("/conversations", response_model=list[ConversationSummary])
+def list_conversations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return db.query(Conversation).filter(Conversation.user_id == user.id).order_by(Conversation.id).all()
+
+
+@app.get("/conversations/{conversation_id}/messages", response_model=list[MessageSummary])
+def list_conversation_messages(
+    conversation_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    conversation = db.query(Conversation).filter(
+        Conversation.id == conversation_id, Conversation.user_id == user.id
+    ).first()
+    if conversation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
+    return conversation.messages
+
 
 @app.post("/chats", status_code=status.HTTP_200_OK)
 def chat(
@@ -99,11 +128,10 @@ def chat(
     db: Session = Depends(get_db),
 ):
     try:
-        # Pass the generator directly to StreamingResponse
         return StreamingResponse(
             create_chat_response(db, user, request.content),
             media_type="text/event-stream"
         )
     except Exception as exc:
-        logger.exception("Chat request failed")
+        logger.error("Chat request failed: %s", type(exc).__name__)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Chat service unavailable") from exc

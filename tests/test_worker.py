@@ -53,6 +53,8 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(run.status, "completed_with_errors")
             self.assertEqual(run.documents_created, 1)
             self.assertIn("empty.txt", run.error_message)
+            self.assertEqual(db.query(Document).count(), 1)
+            self.assertEqual(db.query(IngestionRun).count(), 1)
 
     def test_sweep_with_missing_directory_records_zero_files(self):
         with self.Session() as db:

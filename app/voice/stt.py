@@ -9,7 +9,9 @@ class OpenAISpeechToText:
     def __init__(self, client=None, model: str | None = None):
         if client is None and not settings.OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY is required for speech-to-text")
-        self.client = client or OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = client or OpenAI(
+            api_key=settings.OPENAI_API_KEY, timeout=settings.OPENAI_TIMEOUT_SECONDS, max_retries=1
+        )
         self.model = model or settings.OPENAI_STT_MODEL
 
     def transcribe(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:

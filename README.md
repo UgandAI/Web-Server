@@ -1,6 +1,10 @@
 Environment variables
 ---------------------
 
+Copy `.env.example` to `.env` for local development and replace placeholders. The canonical
+API validates `DATABASE_URL`, a 32+ character `JWT_SECRET`, `OPENAI_API_KEY`, and
+`OPENAI_MODEL` during startup. Never commit `.env`.
+
 ```shell
 DATABASE_URL=sqlite:///./database.db
 JWT_SECRET=replace-with-at-least-32-random-bytes
@@ -56,6 +60,10 @@ Start the canonical API:
 alembic upgrade head
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+`app.main:app` is the only canonical backend entry point. Authentication is bearer JWT via
+`POST /api/token`; protected application routes include `/profiles`, `/logbook`, `/chats`,
+`/conversations`, `/knowledge`, `/recommendations`, and `/voice`.
 
 Local MySQL with Docker Compose
 -------------------------------
@@ -136,6 +144,9 @@ Run it locally once with:
 python -m app.knowledge.worker
 ```
 
+Each source is processed in its own database savepoint. A bad source is recorded without
+rolling back successful sources, and checksum deduplication makes repeated sweeps idempotent.
+
 ## Voice (STT + TTS)
 
 `POST /voice/chat` accepts a multipart audio upload (`audio`), transcribes it with OpenAI
@@ -153,3 +164,15 @@ the reply as MP3 with OpenAI text-to-speech (`OPENAI_TTS_MODEL`/`OPENAI_TTS_VOIC
   "audio_format": "mp3"
 }
 ```
+
+## Verification and rollback
+
+Run the full local suite with `python -m unittest discover -s tests -v`. For MySQL, set
+`MYSQL_TEST_DATABASE_URL` as shown above, run `alembic upgrade head`, then `alembic check`.
+Android uses `./gradlew testDebugUnitTest assembleDebug lintDebug`.
+
+For a bad local release, stop the API, check out the previously verified Git commit, and run
+`alembic downgrade <previous_revision>` only against a disposable/local database after
+reviewing the migration. For a deployed release, restore the application version first and
+follow the environment's reviewed database-backup procedure; never improvise a production
+downgrade or destructive reset.

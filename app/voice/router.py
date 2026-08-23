@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.chat import create_chat_response
+from app.core.config import settings
 from app.db.session import get_db
 from app.models import User
 from app.voice.stt import OpenAISpeechToText
@@ -44,11 +45,20 @@ async def voice_chat(
 ):
     """Speech in, speech out: transcribes the upload, runs it through the normal RAG
     chat pipeline, then synthesizes the reply as audio."""
-    audio_bytes = await audio.read()
+    if not audio.content_type or not audio.content_type.startswith("audio/"):
+        raise HTTPException(415, "An audio content type is required")
+    audio_bytes = await audio.read(settings.VOICE_MAX_UPLOAD_BYTES + 1)
+    if not audio_bytes:
+        raise HTTPException(422, "Audio payload is empty")
+    if len(audio_bytes) > settings.VOICE_MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "Audio payload is too large")
     try:
         transcript = stt.transcribe(audio_bytes, filename=audio.filename or "audio.wav")
+    except ValueError as exc:
+        raise HTTPException(422, "Audio could not be transcribed") from exc
     except Exception as exc:
-        raise HTTPException(422, f"Could not transcribe audio: {exc}") from exc
+        logger.error("Speech transcription failed: %s", type(exc).__name__)
+        raise HTTPException(502, "Speech transcription unavailable") from exc
 
     content = ""
     citations: list[dict] = []
@@ -67,8 +77,10 @@ async def voice_chat(
     try:
         reply_audio = tts.synthesize(content)
     except Exception as exc:
-        logger.exception("Speech synthesis failed")
+        logger.error("Speech synthesis failed: %s", type(exc).__name__)
         raise HTTPException(502, "Speech synthesis unavailable") from exc
+    if not reply_audio:
+        raise HTTPException(502, "Speech synthesis produced no audio")
 
     return VoiceChatResponse(
         transcript=transcript,

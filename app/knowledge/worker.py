@@ -46,14 +46,16 @@ def run_ingestion_sweep(db: Session, *, directory: Path | None = None, embedding
     errors: list[str] = []
     for path in files:
         try:
-            text = path.read_text(encoding="utf-8")
-            result = ingest_document(
-                db,
-                title=path.stem.replace("_", " ").replace("-", " ").title(),
-                source_identifier=f"file:{path.name}",
-                text=text,
-                embedding_service=embedding_service,
-            )
+            with db.begin_nested():
+                text = path.read_text(encoding="utf-8")
+                result = ingest_document(
+                    db,
+                    title=path.stem.replace("_", " ").replace("-", " ").title(),
+                    source_identifier=f"file:{path.name}",
+                    text=text,
+                    embedding_service=embedding_service,
+                    commit=False,
+                )
             if result.created:
                 run.documents_created += 1
                 run.chunks_created += len(result.document.chunks)

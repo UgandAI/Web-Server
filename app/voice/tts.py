@@ -7,7 +7,9 @@ class OpenAITextToSpeech:
     def __init__(self, client=None, model: str | None = None, voice: str | None = None):
         if client is None and not settings.OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY is required for text-to-speech")
-        self.client = client or OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = client or OpenAI(
+            api_key=settings.OPENAI_API_KEY, timeout=settings.OPENAI_TIMEOUT_SECONDS, max_retries=1
+        )
         self.model = model or settings.OPENAI_TTS_MODEL
         self.voice = voice or settings.OPENAI_TTS_VOICE
 
@@ -17,4 +19,7 @@ class OpenAITextToSpeech:
         response = self.client.audio.speech.create(
             model=self.model, voice=self.voice, input=text, response_format="mp3"
         )
-        return response.content
+        content = response.content
+        if not content:
+            raise RuntimeError("Speech synthesis produced no audio")
+        return content

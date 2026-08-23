@@ -84,6 +84,11 @@ class TextToSpeechTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.synthesize("   ")
 
+    def test_synthesize_rejects_empty_audio_response(self):
+        service = OpenAITextToSpeech(client=_FakeTTSClient(content=b""))
+        with self.assertRaises(RuntimeError):
+            service.synthesize("Plant maize.")
+
 
 if __name__ == "__main__":
     unittest.main()

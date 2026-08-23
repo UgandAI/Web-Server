@@ -116,13 +116,38 @@ class CanonicalApiTests(unittest.TestCase):
             algorithms=["HS256"],
         )
         self.assertEqual(claims["username"], "farmer@example.com")
-        self.assertIn("password_hash", claims)
+        self.assertNotIn("password_hash", claims)
+        self.assertEqual(claims["sub"], str(registration.json()["id"]))
+        self.assertIn("iat", claims)
+        self.assertIn("exp", claims)
+
+    def test_invalid_and_expired_tokens_are_rejected(self):
+        from datetime import datetime, timedelta, timezone
+        invalid = self.client.get("/conversations", headers={"Authorization": "Bearer invalid"})
+        self.assertEqual(invalid.status_code, 401)
+        expired = jwt.encode({
+            "sub": "1", "iat": datetime.now(timezone.utc) - timedelta(hours=2),
+            "exp": datetime.now(timezone.utc) - timedelta(hours=1),
+        }, "test-secret-with-at-least-32-bytes", algorithm="HS256")
+        response = self.client.get("/conversations", headers={"Authorization": f"Bearer {expired}"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers["www-authenticate"], "Bearer")
 
     def test_registration_requires_allowlist(self):
         response = self.client.post("/users/register", json={
             "username": "unknown@example.com", "password": "password"
         })
         self.assertEqual(response.status_code, 400)
+
+    def test_configuration_validation_rejects_missing_or_short_secrets(self):
+        from app.core.config import settings, validate_startup_settings
+        original = settings.JWT_SECRET
+        try:
+            settings.JWT_SECRET = "short"
+            with self.assertRaisesRegex(RuntimeError, "JWT_SECRET"):
+                validate_startup_settings()
+        finally:
+            settings.JWT_SECRET = original
 
     @patch("app.chat.validate_chat_content", return_value=None)
     @patch("app.chat.OpenAI", _FakeOpenAI)
@@ -142,6 +167,28 @@ class CanonicalApiTests(unittest.TestCase):
         with self.SessionLocal() as db:
             self.assertEqual(db.query(self.Conversation).count(), 1)
             self.assertEqual(db.query(self.ConversationMessage).count(), 2)
+            conversation_id = db.query(self.Conversation).one().id
+        conversations = self.client.get(
+            "/conversations", headers={"Authorization": f"Bearer {token}"}
+        )
+        self.assertEqual([item["id"] for item in conversations.json()], [conversation_id])
+        messages = self.client.get(
+            f"/conversations/{conversation_id}/messages",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual([item["role"] for item in messages.json()], ["user", "assistant"])
+        from app.auth.security import encode_jwt, hash_password
+        with self.SessionLocal() as db:
+            other = self.User(username="history-other", hashed_password=hash_password("password"))
+            db.add(other)
+            db.commit()
+            db.refresh(other)
+            other_token = encode_jwt({"sub": str(other.id), "username": other.username})
+        hidden = self.client.get(
+            f"/conversations/{conversation_id}/messages",
+            headers={"Authorization": f"Bearer {other_token}"},
+        )
+        self.assertEqual(hidden.status_code, 404)
 
     @patch("app.chat.validate_chat_content", return_value=None)
     @patch("app.chat.OpenAI", _FakeOpenAI)
@@ -253,6 +300,96 @@ class CanonicalApiTests(unittest.TestCase):
     def test_chat_requires_authentication(self):
         response = self.client.post("/chats", json={"content": "plant maize"})
         self.assertEqual(response.status_code, 401)
+
+    def test_profile_logbook_and_conversation_ownership(self):
+        from app.auth.security import encode_jwt, hash_password
+        self.assertEqual(self.register().status_code, 200)
+        token = self.login().json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        profile = self.client.post("/profiles/farm", json={
+            "farm_name": "Green Farm", "district": "Mbale", "crops": "maize", "farm_size": 2.5,
+        }, headers=headers)
+        self.assertEqual(profile.status_code, 201, profile.text)
+        profile_id = profile.json()["id"]
+        updated = self.client.put(f"/profiles/farm/{profile_id}", json={"farm_size": 3.0}, headers=headers)
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(self.client.get("/profiles/farm", headers=headers).json()[0]["farm_size"], 3.0)
+
+        entry = self.client.post("/logbook/", json={
+            "activity_type": "PLANTING", "date": "2026-08-23", "crop": "maize",
+            "field": "north", "note": "started",
+        }, headers=headers)
+        self.assertEqual(entry.status_code, 200, entry.text)
+        entry_id = entry.json()["id"]
+        self.assertEqual(self.client.put(f"/logbook/{entry_id}", json={"note": "done"}, headers=headers).status_code, 200)
+        self.assertEqual(len(self.client.get("/logbook/", headers=headers).json()), 1)
+
+        with self.SessionLocal() as db:
+            other = self.User(username="other@example.com", email="other@example.com", hashed_password=hash_password("password"))
+            db.add(other)
+            db.commit()
+            db.refresh(other)
+            other_token = encode_jwt({"sub": str(other.id), "username": other.username})
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+        self.assertEqual(self.client.put(f"/profiles/farm/{profile_id}", json={"farm_size": 99}, headers=other_headers).status_code, 404)
+        self.assertEqual(self.client.put(f"/logbook/{entry_id}", json={"note": "stolen"}, headers=other_headers).status_code, 404)
+        conversations = self.client.get("/conversations", headers=headers)
+        self.assertEqual(conversations.status_code, 200)
+        self.assertEqual(conversations.json(), [])
+
+    def test_recommendation_uses_owned_farm_profile(self):
+        from app.main import app
+        from app.recommendations.router import get_recommendation_service
+        self.assertEqual(self.register().status_code, 200)
+        headers = {"Authorization": f"Bearer {self.login().json()['access_token']}"}
+        self.client.post("/profiles/farm", json={
+            "farm_name": "Green Farm", "district": "Mbale", "crops": "maize", "farm_size": 2.5,
+        }, headers=headers)
+        class FakeService:
+            def generate(self, **profile):
+                self.profile = profile
+                return "Plant after reliable rains."
+        service = FakeService()
+        app.dependency_overrides[get_recommendation_service] = lambda: service
+        try:
+            response = self.client.get("/recommendations/initial", headers=headers)
+        finally:
+            app.dependency_overrides.pop(get_recommendation_service, None)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["recommendation"], "Plant after reliable rains.")
+        self.assertEqual(service.profile["crops"], "maize")
+
+    @patch("app.chat.validate_chat_content", return_value=None)
+    @patch("app.chat.KnowledgeRetriever")
+    def test_openai_failure_returns_stable_sse_error_and_rolls_back(self, retriever_class, _validate):
+        retriever_class.return_value.retrieve.return_value = []
+        self.assertEqual(self.register().status_code, 200)
+        headers = {"Authorization": f"Bearer {self.login().json()['access_token']}"}
+        class FailingOpenAI:
+            def __init__(self, **kwargs):
+                class Responses:
+                    def create(self, **kwargs):
+                        raise TimeoutError("secret upstream detail")
+                self.responses = Responses()
+        with patch("app.chat.OpenAI", FailingOpenAI):
+            response = self.client.post("/chats", json={"content": "plant maize"}, headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"error": "Chat service unavailable"', response.text)
+        self.assertNotIn("secret upstream detail", response.text)
+        with self.SessionLocal() as db:
+            self.assertEqual(db.query(self.ConversationMessage).count(), 0)
+
+    def test_voice_rejects_invalid_or_empty_upload(self):
+        self.assertEqual(self.register().status_code, 200)
+        headers = {"Authorization": f"Bearer {self.login().json()['access_token']}"}
+        wrong_type = self.client.post(
+            "/voice/chat", files={"audio": ("clip.txt", b"not audio", "text/plain")}, headers=headers
+        )
+        self.assertEqual(wrong_type.status_code, 415)
+        empty = self.client.post(
+            "/voice/chat", files={"audio": ("clip.wav", b"", "audio/wav")}, headers=headers
+        )
+        self.assertEqual(empty.status_code, 422)
 
     @patch("app.chat.validate_chat_content", return_value=None)
     @patch("app.chat.OpenAI", _FakeOpenAI)
