@@ -22,6 +22,7 @@ from app.profiles.router import router as profiles_router
 from app.logbook.router import router as logbook_router
 from app.recommendations.router import router as recommendations_router
 from app.knowledge.router import router as knowledge_router
+from app.voice.router import router as voice_router
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ app.include_router(profiles_router)
 app.include_router(logbook_router)
 app.include_router(recommendations_router)
 app.include_router(knowledge_router)
+app.include_router(voice_router)
 
 
 class ChatRequest(BaseModel):

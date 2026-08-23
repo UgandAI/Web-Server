@@ -41,3 +41,6 @@ class ConversationMessage(Base):
         DateTime(timezone=True), default=utc_now, server_default=func.now(), nullable=False
     )
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    citations: Mapped[list["Citation"]] = relationship(
+        back_populates="message", cascade="all, delete-orphan", order_by="Citation.id"
+    )

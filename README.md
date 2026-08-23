@@ -90,4 +90,66 @@ python -m app.knowledge.ingest --file tests/fixtures/uganda_maize_public_domain.
 
 Embeddings use `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-small`). Chat retrieval
 uses Python cosine similarity over JSON vectors stored in MySQL; `KNOWLEDGE_TOP_K` defaults
-to 3 and `KNOWLEDGE_SIMILARITY_THRESHOLD` defaults to 0.25. Ingestion is manual only.
+to 3 and `KNOWLEDGE_SIMILARITY_THRESHOLD` defaults to 0.25.
+
+## Inspecting documents, chunks, and citations
+
+Every retrieved chunk used to ground an answer is persisted to `citations` alongside the
+assistant's message, so answers stay auditable after the fact:
+
+- `GET /knowledge/documents` — list ingested documents
+- `GET /knowledge/documents/{document_id}/chunks` — list a document's chunks
+- `GET /knowledge/messages/{message_id}/citations` — the chunks/documents cited in a given
+  assistant answer (scoped to the requesting user's own conversation)
+- `GET /knowledge/ingestion-runs` — history of scheduled ingestion sweeps (see below)
+
+All require the same bearer auth as `/chats`.
+
+# Scheduled ingestion + Voice (Week 5)
+
+## Scheduled ingestion worker
+
+`app/knowledge/worker.py` replaces manual, one-off runs of `app.knowledge.ingest` with an
+unattended sweep: it scans `KNOWLEDGE_INGESTION_DIR` (default `./knowledge_sources`) for
+`.txt` files and ingests any that aren't already stored (dedup is by content checksum, same
+as manual ingestion). Every run is logged to `ingestion_runs` and inspectable at
+`GET /knowledge/ingestion-runs`.
+
+Two ways to trigger it, matching how it's deployed:
+
+- **Cron**, on any long-running host:
+  ```bash
+  # crontab -e
+  0 * * * * cd /path/to/Web-Server && OPENAI_API_KEY=... DATABASE_URL=... \
+    python -m app.knowledge.worker >> /var/log/ugandai-ingestion.log 2>&1
+  ```
+- **AWS Lambda + CloudWatch (EventBridge) scheduled rule**: package the `app` module as a
+  Lambda deployment and set the handler to `app.knowledge.worker.lambda_handler`. Attach an
+  EventBridge rule with a `rate(1 hour)` or `cron(...)` schedule expression targeting the
+  function, and give the function's execution role network access to `DATABASE_URL` and the
+  `OPENAI_API_KEY`/`OPENAI_EMBEDDING_MODEL` env vars it needs. This repo does not provision
+  the Lambda or the EventBridge rule itself — deploy those with your existing AWS tooling.
+
+Run it locally once with:
+
+```bash
+python -m app.knowledge.worker
+```
+
+## Voice (STT + TTS)
+
+`POST /voice/chat` accepts a multipart audio upload (`audio`), transcribes it with OpenAI
+speech-to-text (`OPENAI_STT_MODEL`, default `whisper-1`), runs the transcript through the
+same RAG chat pipeline used by `/chats` (guardrails, retrieval, citations), and synthesizes
+the reply as MP3 with OpenAI text-to-speech (`OPENAI_TTS_MODEL`/`OPENAI_TTS_VOICE`, default
+`gpt-4o-mini-tts`/`alloy`). The response is JSON:
+
+```json
+{
+  "transcript": "When should I plant maize?",
+  "content": "Plant maize after the rains begin.",
+  "citations": [{"document_id": 1, "chunk_id": 4, "title": "...", "source": "...", "url": null, "chunk_index": 0, "score": 0.91}],
+  "audio_base64": "...",
+  "audio_format": "mp3"
+}
+```

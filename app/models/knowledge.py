@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -42,3 +42,42 @@ class Chunk(Base):
         DateTime(timezone=True), default=utc_now, server_default=func.now(), nullable=False
     )
     document: Mapped[Document] = relationship(back_populates="chunks")
+
+
+class Citation(Base):
+    """Records which chunk supported a given assistant answer, so answers stay inspectable after the fact."""
+
+    __tablename__ = "citations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("conversation_messages.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    chunk_id: Mapped[int] = mapped_column(
+        ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=func.now(), nullable=False
+    )
+    message: Mapped["ConversationMessage"] = relationship(back_populates="citations")
+    chunk: Mapped[Chunk] = relationship()
+
+
+class IngestionRun(Base):
+    """One execution of the scheduled ingestion sweep (cron / CloudWatch-triggered Lambda)."""
+
+    __tablename__ = "ingestion_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=func.now(), nullable=False
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    source_directory: Mapped[str] = mapped_column(String(1024), nullable=False)
+    files_scanned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    documents_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    documents_skipped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    chunks_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

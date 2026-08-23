@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.knowledge.retrieval import KnowledgeRetriever, RetrievedChunk
-from app.models import Conversation, ConversationMessage, User
+from app.models import Citation, Conversation, ConversationMessage, User
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,13 @@ def create_chat_response(db: Session, user: User, content: str, *, retriever=Non
         client = openai_client or OpenAI(api_key=settings.OPENAI_API_KEY)
         response = client.responses.create(model=settings.OPENAI_MODEL, instructions=instructions, input=history)
         full_response = response.output_text.strip()
-        db.add(ConversationMessage(conversation_id=conversation.id, role="assistant", content=full_response))
+        assistant_message = ConversationMessage(
+            conversation_id=conversation.id, role="assistant", content=full_response
+        )
+        db.add(assistant_message)
+        db.flush()
+        for item in retrieved:
+            db.add(Citation(message_id=assistant_message.id, chunk_id=item.chunk.id, score=item.score))
         db.commit()
         yield f"data: {json.dumps({'content': full_response})}\n\n"
         if retrieved:
