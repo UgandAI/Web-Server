@@ -7,7 +7,7 @@ services:
       MYSQL_PASSWORD: localdev
       MYSQL_ROOT_PASSWORD: localroot
     ports:
-      - "3307:3306"
+      - "${MYSQL_HOST_PORT:-3307}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -25,6 +25,9 @@ services:
       VERIFIED_USERS: farmer@example.com
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      KNOWLEDGE_TOP_K: ${KNOWLEDGE_TOP_K:-3}
+      KNOWLEDGE_SIMILARITY_THRESHOLD: ${KNOWLEDGE_SIMILARITY_THRESHOLD:-0.25}
     ports:
       - "8001:8000"
     depends_on:

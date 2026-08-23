@@ -79,3 +79,15 @@ The existing SQLite authentication tests remain available with:
 ```shell
 python -m unittest -v tests.test_auth
 ```
+# Manual knowledge ingestion (Week 4)
+
+After applying migrations, ingest a UTF-8 source document manually:
+
+```bash
+python -m app.knowledge.ingest --file tests/fixtures/uganda_maize_public_domain.txt \
+  --title "Uganda Maize Growing Notes" --source "fixture:uganda-maize-notes"
+```
+
+Embeddings use `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-small`). Chat retrieval
+uses Python cosine similarity over JSON vectors stored in MySQL; `KNOWLEDGE_TOP_K` defaults
+to 3 and `KNOWLEDGE_SIMILARITY_THRESHOLD` defaults to 0.25. Ingestion is manual only.

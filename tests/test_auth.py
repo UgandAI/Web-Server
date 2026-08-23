@@ -2,12 +2,23 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import json
 from unittest.mock import patch
 
 import jwt
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+
+# Configure the application before unittest discovery imports other test modules.
+_DISCOVERY_TEMP_DIRECTORY = tempfile.TemporaryDirectory()
+os.environ.update({
+    "DATABASE_URL": f"sqlite:///{Path(_DISCOVERY_TEMP_DIRECTORY.name) / 'api.db'}",
+    "JWT_SECRET": "test-secret-with-at-least-32-bytes",
+    "OPENAI_API_KEY": "test-key",
+    "OPENAI_MODEL": "test-model",
+    "VERIFIED_USERS": "farmer@example.com",
+})
 
 
 class _FakeResponse:
@@ -34,26 +45,20 @@ class CanonicalApiTests(unittest.TestCase):
             key: os.environ.get(key)
             for key in ("DATABASE_URL", "JWT_SECRET", "OPENAI_API_KEY", "OPENAI_MODEL", "VERIFIED_USERS")
         }
-        cls.temp_directory = tempfile.TemporaryDirectory()
-        database_path = Path(cls.temp_directory.name) / "api.db"
-        os.environ.update({
-            "DATABASE_URL": f"sqlite:///{database_path}",
-            "JWT_SECRET": "test-secret-with-at-least-32-bytes",
-            "OPENAI_API_KEY": "test-key",
-            "OPENAI_MODEL": "test-model",
-            "VERIFIED_USERS": "farmer@example.com",
-        })
+        cls.temp_directory = _DISCOVERY_TEMP_DIRECTORY
         repository_root = Path(__file__).resolve().parents[1]
         command.upgrade(Config(repository_root / "alembic.ini"), "head")
 
         from app.main import app
         from app.db.session import SessionLocal
-        from app.models import Conversation, ConversationMessage, User
+        from app.models import Chunk, Conversation, ConversationMessage, Document, User
 
         cls.SessionLocal = SessionLocal
         cls.User = User
         cls.Conversation = Conversation
         cls.ConversationMessage = ConversationMessage
+        cls.Chunk = Chunk
+        cls.Document = Document
         cls.client = TestClient(app)
 
     @classmethod
@@ -61,7 +66,6 @@ class CanonicalApiTests(unittest.TestCase):
         from app.db.session import engine
         cls.client.close()
         engine.dispose()
-        cls.temp_directory.cleanup()
         for key, value in cls.original_environment.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -72,6 +76,8 @@ class CanonicalApiTests(unittest.TestCase):
         with self.SessionLocal() as db:
             db.query(self.ConversationMessage).delete()
             db.query(self.Conversation).delete()
+            db.query(self.Chunk).delete()
+            db.query(self.Document).delete()
             db.query(self.User).delete()
             db.commit()
 
@@ -116,7 +122,9 @@ class CanonicalApiTests(unittest.TestCase):
 
     @patch("app.chat.validate_chat_content", return_value=None)
     @patch("app.chat.OpenAI", _FakeOpenAI)
-    def test_authenticated_chat_persists_conversation(self, _validate):
+    @patch("app.chat.KnowledgeRetriever")
+    def test_authenticated_chat_persists_conversation(self, retriever_class, _validate):
+        retriever_class.return_value.retrieve.return_value = []
         self.assertEqual(self.register().status_code, 200)
         token = self.login().json()["access_token"]
         response = self.client.post(
@@ -124,13 +132,45 @@ class CanonicalApiTests(unittest.TestCase):
             json={"sender": "user", "content": "When should I plant maize?"},
             headers={"Authorization": f"Bearer {token}"},
         )
-        self.assertEqual(response.status_code, 201, response.text)
-        self.assertEqual(response.json()["content"], _FakeResponse.output_text)
-        self.assertEqual(response.json()["sender"], "user")
-        self.assertIsNone(response.json()["thread_id"])
+        self.assertEqual(response.status_code, 200, response.text)
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        self.assertEqual(events, [{"content": _FakeResponse.output_text}])
         with self.SessionLocal() as db:
             self.assertEqual(db.query(self.Conversation).count(), 1)
             self.assertEqual(db.query(self.ConversationMessage).count(), 2)
+
+    @patch("app.chat.validate_chat_content", return_value=None)
+    @patch("app.chat.OpenAI", _FakeOpenAI)
+    @patch("app.chat.KnowledgeRetriever")
+    def test_chat_citations_match_retrieved_records(self, retriever_class, _validate):
+        from app.knowledge.retrieval import RetrievedChunk
+        self.assertEqual(self.register().status_code, 200)
+        token = self.login().json()["access_token"]
+        with self.SessionLocal() as db:
+            document = self.Document(
+                title="Public maize notes", source_identifier="fixture:maize", source_url=None,
+                source_type="fixture", checksum="a" * 64,
+            )
+            db.add(document)
+            db.flush()
+            chunk = self.Chunk(document_id=document.id, chunk_index=0, text="Plant with established rains.", embedding="[1.0,0.0]")
+            db.add(chunk)
+            db.commit()
+            db.refresh(chunk)
+            expected_document_id, expected_chunk_id = document.id, chunk.id
+        def retrieve(db, _query):
+            chunk = db.query(self.Chunk).filter(self.Chunk.id == expected_chunk_id).one()
+            return [RetrievedChunk(chunk, 0.9)]
+        retriever_class.return_value.retrieve.side_effect = retrieve
+        response = self.client.post(
+            "/chats", json={"content": "When should I plant maize?"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        citation = events[1]["citations"][0]
+        self.assertEqual(citation["document_id"], expected_document_id)
+        self.assertEqual(citation["chunk_id"], expected_chunk_id)
+        self.assertEqual(citation["source"], "fixture:maize")
 
     def test_chat_requires_authentication(self):
         response = self.client.post("/chats", json={"content": "plant maize"})

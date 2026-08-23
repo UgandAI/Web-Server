@@ -21,6 +21,7 @@ from services import create_user, get_user_by_username
 from app.profiles.router import router as profiles_router
 from app.logbook.router import router as logbook_router
 from app.recommendations.router import router as recommendations_router
+from app.knowledge.router import router as knowledge_router
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ app = FastAPI(title="UgandAI API", description="UgandAI backend API", version="1
 app.include_router(profiles_router)
 app.include_router(logbook_router)
 app.include_router(recommendations_router)
+app.include_router(knowledge_router)
 
 
 class ChatRequest(BaseModel):
