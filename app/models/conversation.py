@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -9,7 +9,6 @@ from app.models.user import utc_now
 
 class Conversation(Base):
     __tablename__ = "conversations"
-    __table_args__ = (UniqueConstraint("user_id", name="uq_conversations_user_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -21,6 +20,9 @@ class Conversation(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now,
         server_default=func.now(), nullable=False
+    )
+    title: Mapped[str] = mapped_column(
+        String(120), default="New conversation", server_default="New conversation", nullable=False
     )
     messages: Mapped[list["ConversationMessage"]] = relationship(
         back_populates="conversation", cascade="all, delete-orphan",

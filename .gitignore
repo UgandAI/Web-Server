@@ -8,3 +8,6 @@ examples/fastapi-user/database.db
 myenv/*
 examples/fastapi-user/venv/*
 database.db
+.env
+.env.*
+!.env.example

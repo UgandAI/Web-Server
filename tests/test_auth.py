@@ -51,7 +51,7 @@ class CanonicalApiTests(unittest.TestCase):
 
         from app.main import app
         from app.db.session import SessionLocal
-        from app.models import Chunk, Citation, Conversation, ConversationMessage, Document, IngestionRun, User
+        from app.models import Chunk, Citation, Conversation, ConversationMessage, Document, FarmProfile, IngestionRun, User
 
         cls.SessionLocal = SessionLocal
         cls.User = User
@@ -61,6 +61,7 @@ class CanonicalApiTests(unittest.TestCase):
         cls.Citation = Citation
         cls.Document = Document
         cls.IngestionRun = IngestionRun
+        cls.FarmProfile = FarmProfile
         cls.client = TestClient(app)
 
     @classmethod
@@ -82,6 +83,7 @@ class CanonicalApiTests(unittest.TestCase):
             db.query(self.Chunk).delete()
             db.query(self.Document).delete()
             db.query(self.IngestionRun).delete()
+            db.query(self.FarmProfile).delete()
             db.query(self.User).delete()
             db.commit()
 
@@ -120,6 +122,21 @@ class CanonicalApiTests(unittest.TestCase):
         self.assertEqual(claims["sub"], str(registration.json()["id"]))
         self.assertIn("iat", claims)
         self.assertIn("exp", claims)
+
+    def test_signup_uses_verified_email_as_login_username(self):
+        signup = self.client.post("/signup", json={
+            "username": "Farmer Display Name",
+            "email": "farmer@example.com",
+            "password": "correct-password",
+        })
+        self.assertEqual(signup.status_code, 200, signup.text)
+        self.assertEqual(signup.json()["username"], "farmer@example.com")
+
+        login = self.client.post("/login", data={
+            "username": "farmer@example.com",
+            "password": "correct-password",
+        })
+        self.assertEqual(login.status_code, 200, login.text)
 
     def test_invalid_and_expired_tokens_are_rejected(self):
         from datetime import datetime, timedelta, timezone
@@ -163,7 +180,8 @@ class CanonicalApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
-        self.assertEqual(events, [{"content": _FakeResponse.output_text}])
+        self.assertEqual(events[0]["content"], _FakeResponse.output_text)
+        self.assertIsInstance(events[0]["conversation_id"], int)
         with self.SessionLocal() as db:
             self.assertEqual(db.query(self.Conversation).count(), 1)
             self.assertEqual(db.query(self.ConversationMessage).count(), 2)
@@ -300,6 +318,99 @@ class CanonicalApiTests(unittest.TestCase):
     def test_chat_requires_authentication(self):
         response = self.client.post("/chats", json={"content": "plant maize"})
         self.assertEqual(response.status_code, 401)
+
+    @patch("app.chat.validate_chat_content", return_value=None)
+    def test_chat_context_is_profile_scoped_and_coexists_with_rag(self, _validate):
+        from app.auth.security import hash_password
+        from app.chat import create_chat_response
+        from app.knowledge.retrieval import RetrievedChunk
+
+        class CapturingResponses:
+            def create(self, **kwargs):
+                self.request = kwargs
+                return _FakeResponse()
+        class CapturingOpenAI:
+            def __init__(self):
+                self.responses = CapturingResponses()
+
+        with self.SessionLocal() as db:
+            user_a = self.User(username="profile-a", hashed_password=hash_password("password"))
+            user_b = self.User(username="profile-b", hashed_password=hash_password("password"))
+            db.add_all([user_a, user_b])
+            db.flush()
+            db.add(self.FarmProfile(
+                user_id=user_a.id, farm_name="A Farm", district="Mbale",
+                crops="maize, beans", farm_size=2.5,
+            ))
+            document = self.Document(
+                title="Maize guide", source_identifier="fixture:guide", source_type="fixture",
+                checksum="f" * 64,
+            )
+            db.add(document)
+            db.flush()
+            chunk = self.Chunk(
+                document_id=document.id, chunk_index=0, text="Use certified maize seed.",
+                embedding="[1.0]",
+            )
+            db.add(chunk)
+            db.commit()
+
+            class Retriever:
+                def retrieve(self, _db, _content):
+                    return [RetrievedChunk(chunk, 0.9)]
+
+            client_a = CapturingOpenAI()
+            list(create_chat_response(db, user_a, "Tell me about my farm", retriever=Retriever(), openai_client=client_a))
+            sent_a = client_a.responses.request["input"]
+            self.assertEqual(sent_a[-1], {"role": "user", "content": "Tell me about my farm"})
+            developer_text_a = "\n".join(x["content"] for x in sent_a if x["role"] == "developer")
+            self.assertIn("<FARM_PROFILE>", developer_text_a)
+            self.assertIn("A Farm", developer_text_a)
+            self.assertIn("Mbale", developer_text_a)
+            self.assertIn("maize, beans", developer_text_a)
+            self.assertIn("2.5", developer_text_a)
+            self.assertIn("<KNOWLEDGE_CONTEXT>", developer_text_a)
+            self.assertIn("certified maize seed", developer_text_a)
+
+            client_b = CapturingOpenAI()
+            list(create_chat_response(db, user_b, "Tell me about my farm", retriever=Retriever(), openai_client=client_b))
+            sent_b = client_b.responses.request["input"]
+            developer_text_b = "\n".join(x["content"] for x in sent_b if x["role"] == "developer")
+            self.assertNotIn("<FARM_PROFILE>", developer_text_b)
+            self.assertNotIn("A Farm", developer_text_b)
+            self.assertIn("<KNOWLEDGE_CONTEXT>", developer_text_b)
+
+    @patch("app.chat.validate_chat_content", return_value=None)
+    @patch("app.chat.OpenAI", _FakeOpenAI)
+    @patch("app.chat.KnowledgeRetriever")
+    def test_multiple_conversations_are_isolated_and_titled(self, retriever_class, _validate):
+        retriever_class.return_value.retrieve.return_value = []
+        self.assertEqual(self.register().status_code, 200)
+        headers = {"Authorization": f"Bearer {self.login().json()['access_token']}"}
+        conversation_a = self.client.post("/conversations", headers=headers).json()
+        conversation_b = self.client.post("/conversations", headers=headers).json()
+        self.assertNotEqual(conversation_a["id"], conversation_b["id"])
+        self.client.post(
+            f"/conversations/{conversation_a['id']}/messages",
+            json={"content": "My first chat is about maize."}, headers=headers,
+        )
+        self.client.post(
+            f"/conversations/{conversation_b['id']}/messages",
+            json={"content": "My second chat is about cassava."}, headers=headers,
+        )
+        messages_a = self.client.get(
+            f"/conversations/{conversation_a['id']}/messages", headers=headers
+        ).json()
+        messages_b = self.client.get(
+            f"/conversations/{conversation_b['id']}/messages", headers=headers
+        ).json()
+        self.assertIn("maize", messages_a[0]["content"])
+        self.assertNotIn("cassava", " ".join(x["content"] for x in messages_a if x["role"] == "user"))
+        self.assertIn("cassava", messages_b[0]["content"])
+        self.assertNotIn("maize", " ".join(x["content"] for x in messages_b if x["role"] == "user"))
+        titles = {item["id"]: item["title"] for item in self.client.get("/conversations", headers=headers).json()}
+        self.assertEqual(titles[conversation_a["id"]], "My first chat is about maize.")
+        self.assertEqual(titles[conversation_b["id"]], "My second chat is about cassava.")
 
     def test_profile_logbook_and_conversation_ownership(self):
         from app.auth.security import encode_jwt, hash_password

@@ -47,6 +47,7 @@ app.include_router(voice_router)
 class ChatRequest(BaseModel):
     sender: str = "user"
     content: str
+    conversation_id: int | None = None
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
@@ -75,7 +76,15 @@ def register(request: schemas.UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/signup", response_model=schemas.SignupUser)
 def signup(request: schemas.SignupCreate, db: Session = Depends(get_db)):
-    return _register_user(request, db)
+    # The Android client signs in with the value entered in its email field.
+    # Keep that value as the canonical username so an account created through
+    # /signup can immediately be used with /login.
+    signup_user = schemas.SignupCreate(
+        username=request.email,
+        email=request.email,
+        password=request.password,
+    )
+    return _register_user(signup_user, db)
 
 
 @app.post("/api/token")
@@ -93,6 +102,7 @@ def issue_token(
 
 class ConversationSummary(BaseModel):
     id: int
+    title: str
     created_at: datetime
     updated_at: datetime
 
@@ -104,9 +114,20 @@ class MessageSummary(BaseModel):
     created_at: datetime
 
 
+@app.post("/conversations", response_model=ConversationSummary, status_code=status.HTTP_201_CREATED)
+def create_conversation(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    conversation = Conversation(user_id=user.id, title="New conversation")
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+    return conversation
+
+
 @app.get("/conversations", response_model=list[ConversationSummary])
 def list_conversations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(Conversation).filter(Conversation.user_id == user.id).order_by(Conversation.id).all()
+    return db.query(Conversation).filter(Conversation.user_id == user.id).order_by(
+        Conversation.updated_at.desc(), Conversation.id.desc()
+    ).all()
 
 
 @app.get("/conversations/{conversation_id}/messages", response_model=list[MessageSummary])
@@ -129,9 +150,25 @@ def chat(
 ):
     try:
         return StreamingResponse(
-            create_chat_response(db, user, request.content),
+            create_chat_response(db, user, request.content, conversation_id=request.conversation_id),
             media_type="text/event-stream"
         )
     except Exception as exc:
         logger.error("Chat request failed: %s", type(exc).__name__)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Chat service unavailable") from exc
+
+
+@app.post("/conversations/{conversation_id}/messages", status_code=status.HTTP_200_OK)
+def send_conversation_message(
+    conversation_id: int, request: ChatRequest,
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    conversation = db.query(Conversation).filter(
+        Conversation.id == conversation_id, Conversation.user_id == user.id
+    ).first()
+    if conversation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
+    return StreamingResponse(
+        create_chat_response(db, user, request.content, conversation_id=conversation.id),
+        media_type="text/event-stream",
+    )

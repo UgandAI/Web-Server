@@ -1,6 +1,9 @@
 import unittest
 
-from app.voice.stt import OpenAISpeechToText
+from app.voice.stt import OpenAISpeechToText, inspect_wav_audio, validate_audio_payload
+import io
+import struct
+import wave
 from app.voice.tts import OpenAITextToSpeech
 
 
@@ -50,12 +53,23 @@ class _FakeTTSClient:
 
 
 class SpeechToTextTests(unittest.TestCase):
+    @staticmethod
+    def wav_bytes(samples, rate=16000):
+        output = io.BytesIO()
+        with wave.open(output, "wb") as target:
+            target.setnchannels(1)
+            target.setsampwidth(2)
+            target.setframerate(rate)
+            target.writeframes(b"".join(struct.pack("<h", value) for value in samples))
+        return output.getvalue()
+
     def test_transcribe_returns_stripped_text(self):
         client = _FakeSTTClient(text="  Plant maize after the rains begin.  ")
         service = OpenAISpeechToText(client=client, model="whisper-1")
         result = service.transcribe(b"fake-audio-bytes", filename="clip.wav")
         self.assertEqual(result, "Plant maize after the rains begin.")
         self.assertEqual(client.audio.transcriptions.calls[0]["model"], "whisper-1")
+        self.assertEqual(client.audio.transcriptions.calls[0]["language"], "en")
 
     def test_transcribe_rejects_empty_audio(self):
         service = OpenAISpeechToText(client=_FakeSTTClient())
@@ -66,6 +80,21 @@ class SpeechToTextTests(unittest.TestCase):
         service = OpenAISpeechToText(client=_FakeSTTClient(text="   "))
         with self.assertRaises(ValueError):
             service.transcribe(b"fake-audio-bytes")
+
+    def test_wav_diagnostics_measure_nonzero_pcm(self):
+        audio = self.wav_bytes(([0, 1000, -1000, 2000, -2000] * 2000))
+        diagnostics = inspect_wav_audio(audio)
+        self.assertIsNotNone(diagnostics)
+        self.assertGreater(diagnostics.rms, 0)
+        self.assertEqual(diagnostics.peak, 2000)
+        self.assertGreater(diagnostics.duration_seconds, 0.5)
+        self.assertIsNotNone(validate_audio_payload(audio))
+
+    def test_wav_validation_rejects_silence_and_short_audio(self):
+        with self.assertRaisesRegex(ValueError, "silent"):
+            validate_audio_payload(self.wav_bytes([0] * 16000))
+        with self.assertRaisesRegex(ValueError, "too short"):
+            validate_audio_payload(self.wav_bytes([1000] * 100))
 
 
 class TextToSpeechTests(unittest.TestCase):

@@ -28,7 +28,7 @@ def run_mysql_flow() -> None:
     os.environ["OPENAI_API_KEY"] = "local-test-placeholder"
     os.environ["OPENAI_MODEL"] = "local-test-model"
     os.environ["JWT_SECRET"] = "local-mysql-test-secret-with-32-bytes"
-    os.environ["VERIFIED_USERS"] = "mysql-alice"
+    os.environ["VERIFIED_USERS"] = "mysql-alice@example.test"
 
     repository_root = Path(__file__).resolve().parents[1]
     command.upgrade(Config(repository_root / "alembic.ini"), "head")
@@ -69,23 +69,44 @@ def run_mysql_flow() -> None:
             return b"controlled-mp3"
 
     client = TestClient(app)
+    def delete_test_user_data(db):
+        test_user = db.query(User).filter(User.username == "mysql-alice@example.test").first()
+        if test_user is not None:
+            conversation_ids = [row[0] for row in db.query(Conversation.id).filter(
+                Conversation.user_id == test_user.id
+            ).all()]
+            if conversation_ids:
+                message_ids = [row[0] for row in db.query(ConversationMessage.id).filter(
+                    ConversationMessage.conversation_id.in_(conversation_ids)
+                ).all()]
+                if message_ids:
+                    db.query(Citation).filter(Citation.message_id.in_(message_ids)).delete(
+                        synchronize_session=False
+                    )
+                db.query(ConversationMessage).filter(
+                    ConversationMessage.conversation_id.in_(conversation_ids)
+                ).delete(synchronize_session=False)
+                db.query(Conversation).filter(Conversation.id.in_(conversation_ids)).delete(
+                    synchronize_session=False
+                )
+            db.query(LogbookEntry).filter(LogbookEntry.user_id == test_user.id).delete()
+            db.query(FarmProfile).filter(FarmProfile.user_id == test_user.id).delete()
+            db.delete(test_user)
+        test_documents = db.query(Document).filter(
+            Document.source_identifier == "fixture:mysql-maize"
+        ).all()
+        for document in test_documents:
+            db.delete(document)
+        db.commit()
+
     try:
         with SessionLocal() as db:
-            db.query(Citation).delete()
-            db.query(ConversationMessage).delete()
-            db.query(Conversation).delete()
-            db.query(LogbookEntry).delete()
-            db.query(FarmProfile).delete()
-            db.query(Chunk).delete()
-            db.query(Document).delete()
-            db.query(IngestionRun).delete()
-            db.query(User).filter(User.username == "mysql-alice").delete()
-            db.commit()
+            delete_test_user_data(db)
 
         signup = client.post(
             "/signup",
             json={
-                "username": "mysql-alice",
+                "username": "mysql-alice@example.test",
                 "email": "mysql-alice@example.test",
                 "password": "correct-password",
             },
@@ -95,7 +116,7 @@ def run_mysql_flow() -> None:
         login = client.post(
             "/login",
             data={
-                "username": "mysql-alice",
+                "username": "mysql-alice@example.test",
                 "password": "correct-password",
             },
         )
@@ -155,7 +176,10 @@ def run_mysql_flow() -> None:
 
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "beans.txt"
-            source.write_text("Bean rows need careful spacing.", encoding="utf-8")
+            source.write_text(
+                f"Bean rows need careful spacing. Test source {Path(directory).name}.",
+                encoding="utf-8",
+            )
             with SessionLocal() as db:
                 first = run_ingestion_sweep(db, directory=Path(directory), embedding_service=embeddings)
                 second = run_ingestion_sweep(db, directory=Path(directory), embedding_service=embeddings)
@@ -163,22 +187,22 @@ def run_mysql_flow() -> None:
                 assert second.documents_skipped == 1
 
         with SessionLocal() as db:
-            assert db.query(ConversationMessage).count() == 4
-            assert db.query(Citation).count() >= 2
-            assert db.query(IngestionRun).count() == 2
+            test_user = db.query(User).filter(
+                User.username == "mysql-alice@example.test"
+            ).one()
+            test_conversation_ids = [row[0] for row in db.query(Conversation.id).filter(
+                Conversation.user_id == test_user.id
+            ).all()]
+            test_message_ids = [row[0] for row in db.query(ConversationMessage.id).filter(
+                ConversationMessage.conversation_id.in_(test_conversation_ids)
+            ).all()]
+            assert len(test_message_ids) == 4
+            assert db.query(Citation).filter(Citation.message_id.in_(test_message_ids)).count() >= 2
+            assert db.query(IngestionRun).count() >= 2
     finally:
         app.dependency_overrides.clear()
         with SessionLocal() as db:
-            db.query(Citation).delete()
-            db.query(ConversationMessage).delete()
-            db.query(Conversation).delete()
-            db.query(LogbookEntry).delete()
-            db.query(FarmProfile).delete()
-            db.query(Chunk).delete()
-            db.query(Document).delete()
-            db.query(IngestionRun).delete()
-            db.query(User).filter(User.username == "mysql-alice").delete()
-            db.commit()
+            delete_test_user_data(db)
         client.close()
         engine.dispose()
 
