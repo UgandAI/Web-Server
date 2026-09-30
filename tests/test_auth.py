@@ -51,7 +51,7 @@ class CanonicalApiTests(unittest.TestCase):
 
         from app.main import app
         from app.db.session import SessionLocal
-        from app.models import Chunk, Citation, Conversation, ConversationMessage, Document, IngestionRun, User
+        from app.models import Chunk, Citation, Conversation, ConversationMessage, Document, FarmProfile, IngestionRun, User
 
         cls.SessionLocal = SessionLocal
         cls.User = User
@@ -61,6 +61,7 @@ class CanonicalApiTests(unittest.TestCase):
         cls.Citation = Citation
         cls.Document = Document
         cls.IngestionRun = IngestionRun
+        cls.FarmProfile = FarmProfile
         cls.client = TestClient(app)
 
     @classmethod
@@ -82,6 +83,7 @@ class CanonicalApiTests(unittest.TestCase):
             db.query(self.Chunk).delete()
             db.query(self.Document).delete()
             db.query(self.IngestionRun).delete()
+            db.query(self.FarmProfile).delete()
             db.query(self.User).delete()
             db.commit()
 
@@ -116,13 +118,53 @@ class CanonicalApiTests(unittest.TestCase):
             algorithms=["HS256"],
         )
         self.assertEqual(claims["username"], "farmer@example.com")
-        self.assertIn("password_hash", claims)
+        self.assertNotIn("password_hash", claims)
+        self.assertEqual(claims["sub"], str(registration.json()["id"]))
+        self.assertIn("iat", claims)
+        self.assertIn("exp", claims)
+
+    def test_signup_uses_verified_email_as_login_username(self):
+        signup = self.client.post("/signup", json={
+            "username": "Farmer Display Name",
+            "email": "farmer@example.com",
+            "password": "correct-password",
+        })
+        self.assertEqual(signup.status_code, 200, signup.text)
+        self.assertEqual(signup.json()["username"], "farmer@example.com")
+
+        login = self.client.post("/login", data={
+            "username": "farmer@example.com",
+            "password": "correct-password",
+        })
+        self.assertEqual(login.status_code, 200, login.text)
+
+    def test_invalid_and_expired_tokens_are_rejected(self):
+        from datetime import datetime, timedelta, timezone
+        invalid = self.client.get("/conversations", headers={"Authorization": "Bearer invalid"})
+        self.assertEqual(invalid.status_code, 401)
+        expired = jwt.encode({
+            "sub": "1", "iat": datetime.now(timezone.utc) - timedelta(hours=2),
+            "exp": datetime.now(timezone.utc) - timedelta(hours=1),
+        }, "test-secret-with-at-least-32-bytes", algorithm="HS256")
+        response = self.client.get("/conversations", headers={"Authorization": f"Bearer {expired}"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers["www-authenticate"], "Bearer")
 
     def test_registration_requires_allowlist(self):
         response = self.client.post("/users/register", json={
             "username": "unknown@example.com", "password": "password"
         })
         self.assertEqual(response.status_code, 400)
+
+    def test_configuration_validation_rejects_missing_or_short_secrets(self):
+        from app.core.config import settings, validate_startup_settings
+        original = settings.JWT_SECRET
+        try:
+            settings.JWT_SECRET = "short"
+            with self.assertRaisesRegex(RuntimeError, "JWT_SECRET"):
+                validate_startup_settings()
+        finally:
+            settings.JWT_SECRET = original
 
     @patch("app.chat.validate_chat_content", return_value=None)
     @patch("app.chat.OpenAI", _FakeOpenAI)
@@ -138,10 +180,33 @@ class CanonicalApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
-        self.assertEqual(events, [{"content": _FakeResponse.output_text}])
+        self.assertEqual(events[0]["content"], _FakeResponse.output_text)
+        self.assertIsInstance(events[0]["conversation_id"], int)
         with self.SessionLocal() as db:
             self.assertEqual(db.query(self.Conversation).count(), 1)
             self.assertEqual(db.query(self.ConversationMessage).count(), 2)
+            conversation_id = db.query(self.Conversation).one().id
+        conversations = self.client.get(
+            "/conversations", headers={"Authorization": f"Bearer {token}"}
+        )
+        self.assertEqual([item["id"] for item in conversations.json()], [conversation_id])
+        messages = self.client.get(
+            f"/conversations/{conversation_id}/messages",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        self.assertEqual([item["role"] for item in messages.json()], ["user", "assistant"])
+        from app.auth.security import encode_jwt, hash_password
+        with self.SessionLocal() as db:
+            other = self.User(username="history-other", hashed_password=hash_password("password"))
+            db.add(other)
+            db.commit()
+            db.refresh(other)
+            other_token = encode_jwt({"sub": str(other.id), "username": other.username})
+        hidden = self.client.get(
+            f"/conversations/{conversation_id}/messages",
+            headers={"Authorization": f"Bearer {other_token}"},
+        )
+        self.assertEqual(hidden.status_code, 404)
 
     @patch("app.chat.validate_chat_content", return_value=None)
     @patch("app.chat.OpenAI", _FakeOpenAI)
@@ -253,6 +318,189 @@ class CanonicalApiTests(unittest.TestCase):
     def test_chat_requires_authentication(self):
         response = self.client.post("/chats", json={"content": "plant maize"})
         self.assertEqual(response.status_code, 401)
+
+    @patch("app.chat.validate_chat_content", return_value=None)
+    def test_chat_context_is_profile_scoped_and_coexists_with_rag(self, _validate):
+        from app.auth.security import hash_password
+        from app.chat import create_chat_response
+        from app.knowledge.retrieval import RetrievedChunk
+
+        class CapturingResponses:
+            def create(self, **kwargs):
+                self.request = kwargs
+                return _FakeResponse()
+        class CapturingOpenAI:
+            def __init__(self):
+                self.responses = CapturingResponses()
+
+        with self.SessionLocal() as db:
+            user_a = self.User(username="profile-a", hashed_password=hash_password("password"))
+            user_b = self.User(username="profile-b", hashed_password=hash_password("password"))
+            db.add_all([user_a, user_b])
+            db.flush()
+            db.add(self.FarmProfile(
+                user_id=user_a.id, farm_name="A Farm", district="Mbale",
+                crops="maize, beans", farm_size=2.5,
+            ))
+            document = self.Document(
+                title="Maize guide", source_identifier="fixture:guide", source_type="fixture",
+                checksum="f" * 64,
+            )
+            db.add(document)
+            db.flush()
+            chunk = self.Chunk(
+                document_id=document.id, chunk_index=0, text="Use certified maize seed.",
+                embedding="[1.0]",
+            )
+            db.add(chunk)
+            db.commit()
+
+            class Retriever:
+                def retrieve(self, _db, _content):
+                    return [RetrievedChunk(chunk, 0.9)]
+
+            client_a = CapturingOpenAI()
+            list(create_chat_response(db, user_a, "Tell me about my farm", retriever=Retriever(), openai_client=client_a))
+            sent_a = client_a.responses.request["input"]
+            self.assertEqual(sent_a[-1], {"role": "user", "content": "Tell me about my farm"})
+            developer_text_a = "\n".join(x["content"] for x in sent_a if x["role"] == "developer")
+            self.assertIn("<FARM_PROFILE>", developer_text_a)
+            self.assertIn("A Farm", developer_text_a)
+            self.assertIn("Mbale", developer_text_a)
+            self.assertIn("maize, beans", developer_text_a)
+            self.assertIn("2.5", developer_text_a)
+            self.assertIn("<KNOWLEDGE_CONTEXT>", developer_text_a)
+            self.assertIn("certified maize seed", developer_text_a)
+
+            client_b = CapturingOpenAI()
+            list(create_chat_response(db, user_b, "Tell me about my farm", retriever=Retriever(), openai_client=client_b))
+            sent_b = client_b.responses.request["input"]
+            developer_text_b = "\n".join(x["content"] for x in sent_b if x["role"] == "developer")
+            self.assertNotIn("<FARM_PROFILE>", developer_text_b)
+            self.assertNotIn("A Farm", developer_text_b)
+            self.assertIn("<KNOWLEDGE_CONTEXT>", developer_text_b)
+
+    @patch("app.chat.validate_chat_content", return_value=None)
+    @patch("app.chat.OpenAI", _FakeOpenAI)
+    @patch("app.chat.KnowledgeRetriever")
+    def test_multiple_conversations_are_isolated_and_titled(self, retriever_class, _validate):
+        retriever_class.return_value.retrieve.return_value = []
+        self.assertEqual(self.register().status_code, 200)
+        headers = {"Authorization": f"Bearer {self.login().json()['access_token']}"}
+        conversation_a = self.client.post("/conversations", headers=headers).json()
+        conversation_b = self.client.post("/conversations", headers=headers).json()
+        self.assertNotEqual(conversation_a["id"], conversation_b["id"])
+        self.client.post(
+            f"/conversations/{conversation_a['id']}/messages",
+            json={"content": "My first chat is about maize."}, headers=headers,
+        )
+        self.client.post(
+            f"/conversations/{conversation_b['id']}/messages",
+            json={"content": "My second chat is about cassava."}, headers=headers,
+        )
+        messages_a = self.client.get(
+            f"/conversations/{conversation_a['id']}/messages", headers=headers
+        ).json()
+        messages_b = self.client.get(
+            f"/conversations/{conversation_b['id']}/messages", headers=headers
+        ).json()
+        self.assertIn("maize", messages_a[0]["content"])
+        self.assertNotIn("cassava", " ".join(x["content"] for x in messages_a if x["role"] == "user"))
+        self.assertIn("cassava", messages_b[0]["content"])
+        self.assertNotIn("maize", " ".join(x["content"] for x in messages_b if x["role"] == "user"))
+        titles = {item["id"]: item["title"] for item in self.client.get("/conversations", headers=headers).json()}
+        self.assertEqual(titles[conversation_a["id"]], "My first chat is about maize.")
+        self.assertEqual(titles[conversation_b["id"]], "My second chat is about cassava.")
+
+    def test_profile_logbook_and_conversation_ownership(self):
+        from app.auth.security import encode_jwt, hash_password
+        self.assertEqual(self.register().status_code, 200)
+        token = self.login().json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        profile = self.client.post("/profiles/farm", json={
+            "farm_name": "Green Farm", "district": "Mbale", "crops": "maize", "farm_size": 2.5,
+        }, headers=headers)
+        self.assertEqual(profile.status_code, 201, profile.text)
+        profile_id = profile.json()["id"]
+        updated = self.client.put(f"/profiles/farm/{profile_id}", json={"farm_size": 3.0}, headers=headers)
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(self.client.get("/profiles/farm", headers=headers).json()[0]["farm_size"], 3.0)
+
+        entry = self.client.post("/logbook/", json={
+            "activity_type": "PLANTING", "date": "2026-08-23", "crop": "maize",
+            "field": "north", "note": "started",
+        }, headers=headers)
+        self.assertEqual(entry.status_code, 200, entry.text)
+        entry_id = entry.json()["id"]
+        self.assertEqual(self.client.put(f"/logbook/{entry_id}", json={"note": "done"}, headers=headers).status_code, 200)
+        self.assertEqual(len(self.client.get("/logbook/", headers=headers).json()), 1)
+
+        with self.SessionLocal() as db:
+            other = self.User(username="other@example.com", email="other@example.com", hashed_password=hash_password("password"))
+            db.add(other)
+            db.commit()
+            db.refresh(other)
+            other_token = encode_jwt({"sub": str(other.id), "username": other.username})
+        other_headers = {"Authorization": f"Bearer {other_token}"}
+        self.assertEqual(self.client.put(f"/profiles/farm/{profile_id}", json={"farm_size": 99}, headers=other_headers).status_code, 404)
+        self.assertEqual(self.client.put(f"/logbook/{entry_id}", json={"note": "stolen"}, headers=other_headers).status_code, 404)
+        conversations = self.client.get("/conversations", headers=headers)
+        self.assertEqual(conversations.status_code, 200)
+        self.assertEqual(conversations.json(), [])
+
+    def test_recommendation_uses_owned_farm_profile(self):
+        from app.main import app
+        from app.recommendations.router import get_recommendation_service
+        self.assertEqual(self.register().status_code, 200)
+        headers = {"Authorization": f"Bearer {self.login().json()['access_token']}"}
+        self.client.post("/profiles/farm", json={
+            "farm_name": "Green Farm", "district": "Mbale", "crops": "maize", "farm_size": 2.5,
+        }, headers=headers)
+        class FakeService:
+            def generate(self, **profile):
+                self.profile = profile
+                return "Plant after reliable rains."
+        service = FakeService()
+        app.dependency_overrides[get_recommendation_service] = lambda: service
+        try:
+            response = self.client.get("/recommendations/initial", headers=headers)
+        finally:
+            app.dependency_overrides.pop(get_recommendation_service, None)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["recommendation"], "Plant after reliable rains.")
+        self.assertEqual(service.profile["crops"], "maize")
+
+    @patch("app.chat.validate_chat_content", return_value=None)
+    @patch("app.chat.KnowledgeRetriever")
+    def test_openai_failure_returns_stable_sse_error_and_rolls_back(self, retriever_class, _validate):
+        retriever_class.return_value.retrieve.return_value = []
+        self.assertEqual(self.register().status_code, 200)
+        headers = {"Authorization": f"Bearer {self.login().json()['access_token']}"}
+        class FailingOpenAI:
+            def __init__(self, **kwargs):
+                class Responses:
+                    def create(self, **kwargs):
+                        raise TimeoutError("secret upstream detail")
+                self.responses = Responses()
+        with patch("app.chat.OpenAI", FailingOpenAI):
+            response = self.client.post("/chats", json={"content": "plant maize"}, headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"error": "Chat service unavailable"', response.text)
+        self.assertNotIn("secret upstream detail", response.text)
+        with self.SessionLocal() as db:
+            self.assertEqual(db.query(self.ConversationMessage).count(), 0)
+
+    def test_voice_rejects_invalid_or_empty_upload(self):
+        self.assertEqual(self.register().status_code, 200)
+        headers = {"Authorization": f"Bearer {self.login().json()['access_token']}"}
+        wrong_type = self.client.post(
+            "/voice/chat", files={"audio": ("clip.txt", b"not audio", "text/plain")}, headers=headers
+        )
+        self.assertEqual(wrong_type.status_code, 415)
+        empty = self.client.post(
+            "/voice/chat", files={"audio": ("clip.wav", b"", "audio/wav")}, headers=headers
+        )
+        self.assertEqual(empty.status_code, 422)
 
     @patch("app.chat.validate_chat_content", return_value=None)
     @patch("app.chat.OpenAI", _FakeOpenAI)

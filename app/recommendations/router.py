@@ -1,54 +1,43 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.farm_profile import FarmProfile
 from app.models.user import User
-from pydantic import BaseModel
-from openai import OpenAI
-from app.core.config import settings
+from app.recommendations.service import RecommendationService
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 
-client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 class RecommendationResponse(BaseModel):
     recommendation: str
+
+
+def get_recommendation_service() -> RecommendationService:
+    return RecommendationService()
+
 
 @router.get("/initial", response_model=RecommendationResponse)
 def get_initial_recommendation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    service: RecommendationService = Depends(get_recommendation_service),
 ):
     profile = db.execute(
         select(FarmProfile).where(FarmProfile.user_id == current_user.id)
-    ).scalar_one_or_none()
-
+    ).scalars().first()
     if not profile:
-        raise HTTPException(status_code=400, detail="Farm profile not found. Please complete your profile first.")
-
-    prompt = f"""
-    The user is a farmer in Uganda. 
-    Farm Size: {profile.farm_size} acres.
-    District: {profile.district}.
-    Crops: {profile.primary_crops}.
-    
-    Please provide one concise, encouraging initial piece of farming advice or recommendation for them (max 3 sentences). 
-    """
-
+        raise HTTPException(400, "Farm profile not found. Please complete your profile first.")
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are an expert agronomist providing tailored advice to Ugandan farmers."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=100,
-            temperature=0.7,
-        )
-        recommendation = response.choices[0].message.content.strip()
-        return {"recommendation": recommendation}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to generate recommendation")
+        return {"recommendation": service.generate(
+            farm_size=profile.farm_size, district=profile.district, crops=profile.crops
+        )}
+    except Exception as exc:
+        logger.error("Initial recommendation generation failed: %s", type(exc).__name__)
+        raise HTTPException(502, "Recommendation service unavailable")

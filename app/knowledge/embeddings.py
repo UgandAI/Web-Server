@@ -31,7 +31,9 @@ class OpenAIEmbeddingService:
     def __init__(self, client=None, model: str | None = None):
         if client is None and not settings.OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY is required for embeddings")
-        self.client = client or OpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = client or OpenAI(
+            api_key=settings.OPENAI_API_KEY, timeout=settings.OPENAI_TIMEOUT_SECONDS, max_retries=1
+        )
         self.model = model or settings.OPENAI_EMBEDDING_MODEL
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:

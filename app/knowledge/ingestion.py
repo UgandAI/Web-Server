@@ -29,6 +29,7 @@ def ingest_document(
     source_type: str = "local",
     published_at: datetime | None = None,
     embedding_service=None,
+    commit: bool = True,
 ) -> IngestionResult:
     normalized = normalize_text(text)
     if not normalized:
@@ -56,9 +57,13 @@ def ingest_document(
                 document_id=document.id, chunk_index=index, text=piece,
                 embedding=serialize_embedding(vector), token_count=len(piece.split()),
             ))
-        db.commit()
-        db.refresh(document)
+        if commit:
+            db.commit()
+            db.refresh(document)
+        else:
+            db.flush()
     except Exception:
-        db.rollback()
+        if commit:
+            db.rollback()
         raise
     return IngestionResult(document, True)

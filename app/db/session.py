@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 engine_kwargs = (
     {"connect_args": {"check_same_thread": False}}
     if settings.DATABASE_URL.startswith("sqlite")
-    else {}
+    else {"pool_pre_ping": True, "pool_recycle": 1800}
 )
 
 engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
@@ -25,6 +25,9 @@ def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -36,5 +39,5 @@ def check_db_connection() -> bool:
             connection.execute(text("SELECT 1"))
         return True
     except Exception as exc:
-        logger.error("Database health check failed: %s", exc)
+        logger.error("Database health check failed: %s", type(exc).__name__)
         return False
